@@ -52,6 +52,11 @@ pub fn store_dir(s: &Scope, name: &str) -> PathBuf {
     s.root.join(STORE).join(name)
 }
 
+/// `<store>/<name>` as messages name it.
+pub fn store_shown(s: &Scope, name: &str) -> String {
+    s.show(&format!("{STORE}/{name}"))
+}
+
 /// Skill directories in the store, excluding temp dirs.
 pub fn store_names(s: &Scope) -> Result<Vec<String>> {
     let mut out = Vec::new();
@@ -148,7 +153,7 @@ pub fn place(s: &Scope, name: &str, src: &Path) -> Result<()> {
     copy_dir(src, staged.path())?;
     let dest = store_dir(s, name);
     let old = s.root.join(STORE).join(format!("{OLD}{name}-{}", std::process::id()));
-    let (shown, old_shown) = (s.show(&format!("{STORE}/{name}")), s.show(&rel(&s.root, &old)));
+    let (shown, old_shown) = (store_shown(s, name), s.show(&rel(&s.root, &old)));
     if old.symlink_metadata().is_ok() {
         std::fs::remove_dir_all(&old).ctx(&old_shown)?;
     }
@@ -436,7 +441,7 @@ pub fn write_modes(s: &Scope, modes: &BTreeSet<String>) -> Result<()> {
         return Ok(());
     }
     let path = s.root.join(STORE).join(MODES);
-    let shown = s.show(&format!("{STORE}/{MODES}"));
+    let shown = store_shown(s, MODES);
     if modes.is_empty() {
         if path.exists() {
             std::fs::remove_file(path).ctx(shown)?;
@@ -469,13 +474,13 @@ fn ignore_file(s: &Scope) -> PathBuf {
 
 /// The file holding the managed block, as messages name it.
 pub fn block_file(s: &Scope) -> String {
-    if s.global { s.show(&format!("{STORE}/{INSTALLED}")) } else { ".gitignore".into() }
+    if s.global { store_shown(s, INSTALLED) } else { ".gitignore".into() }
 }
 
 /// Project scope: what skillcask placed in the store on this machine, unlike the committed block.
 /// The same file and format as the global managed list, holding only store lines.
 fn record_file(s: &Scope) -> (PathBuf, String) {
-    (s.root.join(STORE).join(INSTALLED), s.show(&format!("{STORE}/{INSTALLED}")))
+    (s.root.join(STORE).join(INSTALLED), store_shown(s, INSTALLED))
 }
 
 fn read_gitignore(s: &Scope) -> Result<Gitignore> {

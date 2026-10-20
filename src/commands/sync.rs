@@ -15,7 +15,7 @@ pub(crate) fn install(ctx: &Ctx, frozen: bool) -> Result<()> {
     let mut m = Manifest::load(&ctx.s.config, ctx.s.global)?;
     let mut lock = Lock::load(&ctx.s.config)?;
     let old = lock.clone();
-    let (_, _, why) = reconcile(&m, &deps::wanted(&m, &lock)?.reqs, &lock);
+    let why = reconcile(&m, &deps::wanted(&m, &lock)?.reqs, &lock).why;
     let filled = !frozen && fill_new_keys(&m, &mut lock);
     let mut prepared = HashMap::new();
     if !why.is_empty() {

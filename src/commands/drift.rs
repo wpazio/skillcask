@@ -5,8 +5,15 @@ use crate::lock::{Lock, Package};
 use crate::manifest::{GitHub, Manifest, Repository, SkillReq};
 
 /// Manifest entries that need resolving, lock entries to drop, and why.
+pub(super) struct Reconciled {
+    pub(super) needs: Vec<SkillReq>,
+    pub(super) stale: Vec<String>,
+    /// A line per entry of `needs`, then per entry of `stale`.
+    pub(super) why: Vec<String>,
+}
+
 /// `reqs`: the effective requirements, `deps::wanted`.
-pub(super) fn reconcile(m: &Manifest, reqs: &[SkillReq], lock: &Lock) -> (Vec<SkillReq>, Vec<String>, Vec<String>) {
+pub(super) fn reconcile(m: &Manifest, reqs: &[SkillReq], lock: &Lock) -> Reconciled {
     let (mut needs, mut stale, mut why) = (Vec::new(), Vec::new(), Vec::new());
     for req in reqs {
         if let Some(r) = drift(m, req, lock.get(&req.name)) {
@@ -20,14 +27,14 @@ pub(super) fn reconcile(m: &Manifest, reqs: &[SkillReq], lock: &Lock) -> (Vec<Sk
             stale.push(p.name.clone());
         }
     }
-    (needs, stale, why)
+    Reconciled { needs, stale, why }
 }
 
 /// Manifest entries that drift from `lock`, and lock entries nobody wants: commands that do not
 /// own them leave them alone.
 pub(super) fn drifted(m: &Manifest, lock: &Lock) -> BTreeSet<String> {
     let Ok(w) = deps::wanted(m, lock) else { return BTreeSet::new() };
-    let (needs, stale, _) = reconcile(m, &w.reqs, lock);
+    let Reconciled { needs, stale, .. } = reconcile(m, &w.reqs, lock);
     needs.into_iter().map(|r| r.name).filter(|n| m.skill(n).is_some()).chain(stale).collect()
 }
 
@@ -189,19 +196,19 @@ mod tests {
     #[test]
     fn reconcile_lists_needs_then_stale() {
         let m = manifest("\"acme/a\" = \"^1.0\"");
-        let (needs, stale, why) = reconcile(&m, &m.skills, &Lock::default());
+        let Reconciled { needs, stale, why } = reconcile(&m, &m.skills, &Lock::default());
         assert_eq!(needs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["acme/a"], "empty lock: needs");
         assert_eq!(stale, Vec::<String>::new(), "empty lock: stale");
         assert_eq!(why, ["acme/a: not in skills.lock"], "empty lock: why");
 
         let orphan = lock(vec![pkg("acme/b", "^1.0", ACME, &["b"])]);
-        let (needs, stale, why) = reconcile(&m, &m.skills, &orphan);
+        let Reconciled { needs, stale, why } = reconcile(&m, &m.skills, &orphan);
         assert_eq!(needs.len(), 1, "orphan: needs");
         assert_eq!(stale, ["acme/b"], "orphan: stale");
         assert_eq!(why, ["acme/a: not in skills.lock", "acme/b: in skills.lock but neither in skills.toml nor required"], "orphan: why");
 
         let matching = lock(vec![pkg("acme/a", "^1.0", ACME, &["a"])]);
-        let (needs, stale, why) = reconcile(&m, &m.skills, &matching);
+        let Reconciled { needs, stale, why } = reconcile(&m, &m.skills, &matching);
         assert!(needs.is_empty(), "{needs:?}");
         assert!(stale.is_empty(), "{stale:?}");
         assert!(why.is_empty(), "{why:?}");

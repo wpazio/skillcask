@@ -9,7 +9,7 @@ use crate::project::{self, STORE};
 use crate::skill;
 
 use super::Ctx;
-use super::disk::{hand_written, installed_ok, kept, link_plan, locked_names, managed_paths, set_modes, shadows};
+use super::disk::{Link, hand_written, installed_ok, kept, link_plan, locked_names, managed_paths, set_modes, shadows};
 use super::fetch::{Fetched, skill_md_of};
 
 impl Ctx {
@@ -85,7 +85,7 @@ impl Ctx {
                 project::place(s, &sk.name, &f.dir.path().join(&sk.path))?;
                 if let Some(md) = skill_md {
                     // Truncates in place, so the copied mode stays.
-                    let shown = s.show(&format!("{STORE}/{}/{}", sk.name, skill::SKILL_MD));
+                    let shown = format!("{}/{}", project::store_shown(s, &sk.name), skill::SKILL_MD);
                     std::fs::write(project::store_dir(s, &sk.name).join(skill::SKILL_MD), md).ctx(shown)?;
                 }
                 set_modes(&mut modes, &sk.name, &files);
@@ -99,14 +99,14 @@ impl Ctx {
             }
             set_modes(&mut modes, n, &[]);
             if kept.contains(n) {
-                crate::ui::warn(format!("kept {}: modified or not installed by skillcask", s.show(&format!("{STORE}/{n}"))));
+                crate::ui::warn(format!("kept {}: modified or not installed by skillcask", project::store_shown(s, n)));
                 continue;
             }
             let dir = project::store_dir(s, n);
             if dir.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
-                std::fs::remove_file(&dir).ctx(s.show(&format!("{STORE}/{n}")))?;
+                std::fs::remove_file(&dir).ctx(project::store_shown(s, n))?;
             } else if dir.is_dir() {
-                std::fs::remove_dir_all(dir).ctx(s.show(&format!("{STORE}/{n}")))?;
+                std::fs::remove_dir_all(dir).ctx(project::store_shown(s, n))?;
             }
             crate::ui::done("removed", n);
         }
@@ -115,7 +115,7 @@ impl Ctx {
         let plan = link_plan(m, &locked, &hand, &locals);
         if !s.global {
             // In home skillcask links only locked skills; other links there are the user's.
-            let names: BTreeSet<&String> = plan.iter().map(|(_, _, n)| n).collect();
+            let names: BTreeSet<&String> = plan.iter().map(|l| &l.name).collect();
             for t in &m.targets {
                 for e in std::fs::read_dir(s.root.join(t)).into_iter().flatten().flatten() {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -126,8 +126,8 @@ impl Ctx {
             }
         }
         let mut copies = BTreeSet::new();
-        for (at, source, n) in plan {
-            if project::link(s, &at, source, &n)? && !locked.contains_key(&n) {
+        for Link { at, source, name: n } in plan {
+            if project::link(s, at, source, &n)? && !locked.contains_key(&n) {
                 copies.insert(format!("/{at}/{n}"));
             }
         }

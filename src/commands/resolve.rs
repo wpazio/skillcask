@@ -14,7 +14,7 @@ use crate::skill;
 use crate::version::{self, Constraint};
 
 use super::Ctx;
-use super::drift::{locked_repository, reconcile, source_changed};
+use super::drift::{Reconciled, locked_repository, reconcile, source_changed};
 use super::fetch::{Fetched, skill_md_of};
 
 impl Ctx {
@@ -210,7 +210,7 @@ pub(super) fn settle_deps(
     let mut report = Vec::new();
     for _ in 0..MAX_ROUNDS {
         let w = deps::wanted(m, lock)?;
-        let (needs, stale, _) = reconcile(m, &w.reqs, lock);
+        let Reconciled { needs, stale, .. } = reconcile(m, &w.reqs, lock);
         lock.packages.retain(|p| !stale.contains(&p.name) || skip.contains(&p.name));
         let needs: Vec<SkillReq> = needs.into_iter().filter(|r| !skip.contains(&r.name)).collect();
         if needs.is_empty() {

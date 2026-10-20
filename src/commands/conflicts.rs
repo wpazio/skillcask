@@ -9,7 +9,7 @@ use crate::scope::Scope;
 use crate::skill;
 
 use super::Ctx;
-use super::disk::{hand_written, kept, link_plan, locked_names, locked_skill, not_ours, shadows, tree_on_disk};
+use super::disk::{Link, hand_written, kept, link_plan, locked_names, locked_skill, not_ours, shadows, tree_on_disk};
 use super::fetch::Fetched;
 
 impl Ctx {
@@ -37,9 +37,9 @@ impl Ctx {
         let locals = project::local_names(s, &m.local)?;
         let kept = kept(s, lock, old, &old_managed);
         let hand = hand_written(s, lock, &old_managed.difference(&kept).cloned().collect(), &locals)?;
-        for (at, source, n) in link_plan(m, &locked, &hand, &locals) {
+        for Link { at, source, name: n } in link_plan(m, &locked, &hand, &locals) {
             let removed = old_managed.contains(&n) && !kept.contains(&n) && !locked.contains_key(&n);
-            if !(at == STORE && removed) && not_ours(s, m, &at, &n, &project::link_state(s, &at, source, &n), &old_managed) {
+            if !(at == STORE && removed) && not_ours(s, m, at, &n, &project::link_state(s, at, source, &n), &old_managed) {
                 bail!(MANIFEST, "{} exists and was not created by skillcask; move it away", s.show(&format!("{at}/{n}")));
             }
         }
@@ -292,7 +292,7 @@ enum Owned {
 /// other dir is a local edit, restored only when skillcask installed it on this machine and its
 /// lock entry is unchanged.
 fn store_conflict(s: &Scope, p: &Package, sk: &LockedSkill, old: &Lock, owned: &Owned) -> Option<(String, bool)> {
-    let shown = s.show(&format!("{STORE}/{}", sk.name));
+    let shown = project::store_shown(s, &sk.name);
     let mut expect = vec![sk.tree_sha256.as_str()];
     let old_skill = locked_skill(old, &sk.name);
     expect.extend(old_skill.map(|(_, os)| os.tree_sha256.as_str()));

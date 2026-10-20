@@ -13,7 +13,7 @@ use crate::ui;
 use crate::version::Constraint;
 
 use super::Ctx;
-use super::disk::{hand_written, link_plan, locked_names, managed_paths, not_ours, shadows, tree_on_disk};
+use super::disk::{Link, hand_written, link_plan, locked_names, managed_paths, not_ours, shadows, tree_on_disk};
 use super::drift::drift;
 
 pub(crate) fn outdated(ctx: &Ctx) -> Result<()> {
@@ -140,22 +140,22 @@ pub(crate) fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
     let mut fixed = Vec::new();
 
     let mut copies = BTreeSet::new();
-    for (at, source, n) in link_plan(&m, &locked, &hand, &locals) {
-        let state = project::link_state(s, &at, source, &n);
+    for Link { at, source, name: n } in link_plan(&m, &locked, &hand, &locals) {
+        let state = project::link_state(s, at, source, &n);
         let what = format!("{}: link {}", s.show(&format!("{at}/{n}")), format!("{state:?}").to_lowercase());
-        if state != LinkState::Foreign && not_ours(s, &m, &at, &n, &state, &old_managed) {
+        if state != LinkState::Foreign && not_ours(s, &m, at, &n, &state, &old_managed) {
             open.push(format!("{} exists and was not created by skillcask; move it away", s.show(&format!("{at}/{n}"))));
         } else if state != LinkState::Ok {
             if fix && s.root.join(source).join(&n).is_dir() && state != LinkState::Foreign {
-                project::link(s, &at, source, &n)?;
+                project::link(s, at, source, &n)?;
                 fixed.push(what);
             } else {
                 open.push(what);
             }
         }
-        let p = s.root.join(&at).join(&n);
+        let p = s.root.join(at).join(&n);
         let is_copy = p.symlink_metadata().is_ok_and(|m| m.is_dir()) && p.join(project::COPY_MARKER).is_file();
-        if !locked.contains_key(&n) && project::link_state(s, &at, source, &n) == LinkState::Ok && is_copy {
+        if !locked.contains_key(&n) && project::link_state(s, at, source, &n) == LinkState::Ok && is_copy {
             copies.insert(format!("/{at}/{n}"));
         }
     }
@@ -186,9 +186,9 @@ pub(crate) fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
 
     for (n, (p, sk)) in &locked {
         match tree_on_disk(s, n, &[&sk.tree_sha256]) {
-            None => open.push(format!("{}: not installed ({}); run `skillcask install`", s.show(&format!("{STORE}/{n}")), p.name)),
+            None => open.push(format!("{}: not installed ({}); run `skillcask install`", project::store_shown(s, n), p.name)),
             Some(h) if h != sk.tree_sha256 => {
-                open.push(format!("{}: modified ({}); run `skillcask install` to restore", s.show(&format!("{STORE}/{n}")), p.name));
+                open.push(format!("{}: modified ({}); run `skillcask install` to restore", project::store_shown(s, n), p.name));
             }
             Some(_) => {}
         }

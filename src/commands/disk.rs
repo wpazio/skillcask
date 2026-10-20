@@ -65,17 +65,23 @@ pub(super) fn hand_written(s: &Scope, lock: &Lock, old_managed: &BTreeSet<String
         .collect())
 }
 
-/// Every link as (directory, source directory, name): project skills into the store, then all
-/// skills from the store into each agent target.
+/// One link `preflight` checks, `materialize` makes and `doctor` repairs: `<at>/<name>` into `<source>/<name>`.
+pub(super) struct Link<'a> {
+    pub(super) at: &'a str,
+    pub(super) source: &'a str,
+    pub(super) name: String,
+}
+
+/// Every link: project skills into the store, then all skills from the store into each agent target.
 pub(super) fn link_plan<'a>(
     m: &'a Manifest,
     locked: &BTreeMap<String, (&Package, &LockedSkill)>,
     hand: &BTreeSet<String>,
     locals: &BTreeSet<String>,
-) -> Vec<(String, &'a str, String)> {
-    let mut plan: Vec<(String, &str, String)> = locals.iter().map(|n| (STORE.to_string(), m.local.as_str(), n.clone())).collect();
+) -> Vec<Link<'a>> {
+    let mut plan: Vec<Link> = locals.iter().map(|n| Link { at: STORE, source: m.local.as_str(), name: n.clone() }).collect();
     for n in locked.keys().chain(hand).chain(locals) {
-        plan.extend(m.targets.iter().map(|t| (t.clone(), STORE, n.clone())));
+        plan.extend(m.targets.iter().map(|t| Link { at: t.as_str(), source: STORE, name: n.clone() }));
     }
     plan
 }
@@ -169,7 +175,7 @@ mod tests {
         let hand = BTreeSet::from(["hand".to_string()]);
         let locals = BTreeSet::from(["local".to_string()]);
         let plan: Vec<String> =
-            link_plan(&m, &locked, &hand, &locals).iter().map(|(at, source, n)| format!("{at}/{n} -> {source}/{n}")).collect();
+            link_plan(&m, &locked, &hand, &locals).iter().map(|l| format!("{}/{} -> {}/{}", l.at, l.name, l.source, l.name)).collect();
         assert_eq!(
             plan,
             [
