@@ -906,9 +906,7 @@ fn settle_deps(
             let current = lock.get(&req.name).cloned();
             let p = match ctx.relock(m, req, current.as_ref(), prepared)? {
                 Some(p) => p,
-                None => ctx
-                    .resolve(m, req, current.as_ref(), prepared)
-                    .map_err(|e| Error::new(e.code, format!("{}{}", e.msg, required_by(&w, &req.name))))?,
+                None => ctx.resolve(m, req, current.as_ref(), prepared).map_err(|e| e.map_msg(|m| m + &required_by(&w, &req.name)))?,
             };
             if current.is_none() && m.skill(&req.name).is_none() {
                 let by: Vec<&str> = w.by.get(&req.name).into_iter().flatten().map(|(r, _)| r.as_str()).collect();
