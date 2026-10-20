@@ -903,6 +903,18 @@ fn global_needs_a_home() {
 }
 
 #[test]
+fn the_environment_applies_without_a_home() {
+    let s = Server::start();
+    let mut p = Project::new(&s);
+    p.manifest(&s, "\"acme/one\" = \"^1.0\"\n");
+    p.env.push(("HOME".into(), String::new()));
+    p.env.push(("USERPROFILE".into(), String::new()));
+    p.env.push(("SKILLCASK_ALLOW_RANGES".into(), "false".into()));
+    let out = p.expect(&["status"], 1);
+    assert!(out.contains("allow-ranges = false requires an exact version"), "{out}");
+}
+
+#[test]
 fn global_uses_xdg_config_home() {
     let s = Server::start();
     s.simple("acme/one", "1.0.0", "one");

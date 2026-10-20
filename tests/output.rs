@@ -100,6 +100,18 @@ fn colour_follows_clicolor_force_and_no_color() {
 }
 
 #[test]
+fn an_environment_override_is_warned_about_once_per_run() {
+    let s = Server::start();
+    let mut p = installed(&s);
+    let dir = p.home().join(".config/skillcask");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.toml"), "[policy]\nallow-ranges = false\nenforce = [\"allow-ranges\"]\n").unwrap();
+    p.env.push(("SKILLCASK_ALLOW_RANGES".into(), "true".into()));
+    let out = p.ok(&["status"]);
+    assert_eq!(out.matches("SKILLCASK_ALLOW_RANGES overrides").count(), 1, "{out}");
+}
+
+#[test]
 fn the_home_directory_error_names_the_way_out() {
     let s = Server::start();
     let mut p = Project::new(&s);
