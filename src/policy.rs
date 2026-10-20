@@ -290,4 +290,28 @@ mod tests {
         assert!(!under("https://api.github.com/repos/acmex/r", "https://api.github.com/repos/acme"));
         assert!(under("https://api.github.com/repos/acme/r", "https://api.github.com/repos/acme"));
     }
+
+    #[test]
+    fn source_entries_value_types_and_unreadable_config() {
+        let project = |t: &str| {
+            let doc: DocumentMut = t.parse().unwrap();
+            layer(doc.get("policy").and_then(Item::as_table_like), "skills.toml", false)
+        };
+        // Neither file takes an empty entry, a bare scheme, a plain-http URL or a name with a space.
+        for bad in ["", "https://", "http://example.com", "a b"] {
+            let t = format!("[policy]\nallow-sources = [{bad:?}]");
+            assert!(project(&t).is_err(), "{bad:?}");
+            assert!(cfg(&t).unwrap_err().msg.contains("is not packagist"), "{bad:?}");
+        }
+        assert!(project("[policy]\nallow-sources = [\"https://h\", \"acme\"]").is_ok());
+        assert!(cfg("[policy]\nmin-release-age = true").unwrap_err().msg.contains("must be a string"));
+        assert!(cfg("[policy]\nallow-sources = true").unwrap_err().msg.contains("must be a list"));
+        for (s, b) in [("true", true), ("false", false)] {
+            let l = env_layer(|k| (k == "SKILLCASK_ALLOW_RANGES").then(|| s.to_string())).unwrap();
+            assert_eq!(l.values["allow-ranges"], Value::Bool(b), "{s}");
+        }
+        // Only a missing config is an empty layer; one that exists but cannot be read is an error.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_config(dir.path()).is_err());
+    }
 }
