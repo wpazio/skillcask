@@ -94,7 +94,8 @@ Codex lists both.
 ```toml
 [repositories]
 acme = { type = "composer", url = "https://git.example.com/api/v4/group/42/-/packages/composer/packages.json" }
-# A repository you review yourself can skip the cooldown; the others keep it.
+# A repository you review yourself can skip the cooldown; the others keep it. A cooldown set by
+# SKILLCASK_MIN_RELEASE_AGE or enforced in config.toml stays the minimum.
 own = { url = "https://git.example.com/own/packages.json", min-release-age = "0" }
 # Default sources, written by `init`; `= false` turns one off. Packagist is always searched last.
 packagist = { url = "https://repo.packagist.org" }

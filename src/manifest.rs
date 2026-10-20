@@ -172,9 +172,15 @@ impl Manifest {
         self.skills.iter().find(|s| s.name == name)
     }
 
-    /// The cooldown for packages from `repo`.
+    /// The cooldown for packages from `repo`: its own (D15), but never below a value the
+    /// environment or an enforced `config.toml` sets (D20).
     pub fn min_release_age(&self, repo: &Repository) -> SignedDuration {
-        repo.min_release_age.unwrap_or(self.policy.min_release_age)
+        let policy = self.policy.min_release_age;
+        match repo.min_release_age {
+            Some(own) if crate::policy::fixed(&self.policy.effective, "min-release-age") => own.max(policy),
+            Some(own) => own,
+            None => policy,
+        }
     }
 }
 
@@ -645,6 +651,24 @@ min-release-age = "12h"
         assert!(!allow.allows(PACKAGIST_URL) && !allow.allows("https://a.example/other.json"));
         assert_eq!(names(&allow), ["acme", "packagist"]);
         assert_eq!(allow.allowed_repositories().len(), 1);
+    }
+
+    #[test]
+    fn a_repository_cooldown_cannot_go_below_a_fixed_policy() {
+        use crate::policy::{Layer, Outer, env_layer, layer};
+        let text = "[repositories]\nfast = { url = \"https://a.example\", min-release-age = \"0\" }\n\
+                    slow = { url = \"https://b.example\", min-release-age = \"30d\" }\n[policy]\nmin-release-age = \"1d\"";
+        let ages = |o: &Outer| {
+            let m = parse_with(text, false, o).unwrap();
+            ["fast", "slow"].map(|n| m.min_release_age(m.repository(n).unwrap()).as_hours())
+        };
+        assert_eq!(ages(&Outer::default()), [0, 720], "D15: the repository's own value");
+        let doc: DocumentMut = "[policy]\nmin-release-age = \"1d\"\nenforce = [\"min-release-age\"]".parse().unwrap();
+        let config = layer(doc.get("policy").and_then(Item::as_table_like), "config.toml", true).unwrap();
+        let enforced = Outer { config, config_path: "config.toml".into(), env: Layer::default() };
+        assert_eq!(ages(&enforced), [24, 720], "enforced: a floor, a stricter repository still wins");
+        let env = env_layer(|k| (k == "SKILLCASK_MIN_RELEASE_AGE").then(|| "2d".to_string())).unwrap();
+        assert_eq!(ages(&Outer { env, ..Default::default() }), [48, 720], "environment: a floor");
     }
 
     #[test]

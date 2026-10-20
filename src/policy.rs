@@ -52,6 +52,9 @@ pub struct Outer {
 /// Each key that is set, its value and the layer it came from.
 pub type Effective = BTreeMap<&'static str, (Value, &'static str)>;
 
+const ENVIRONMENT: &str = "environment";
+const ENFORCED: &str = "config.toml, enforced";
+
 fn key(k: &str) -> Option<&'static str> {
     KEYS.iter().copied().find(|x| *x == k)
 }
@@ -197,9 +200,9 @@ pub fn resolve(project: &Layer, o: &Outer) -> Result<Effective> {
             )));
         }
         let pick = if let Some(v) = o.env.values.get(k) {
-            Some((v, "environment"))
+            Some((v, ENVIRONMENT))
         } else if let Some(v) = enforced {
-            Some((v, "config.toml, enforced"))
+            Some((v, ENFORCED))
         } else if let Some(v) = project.values.get(k) {
             Some((v, "skills.toml"))
         } else {
@@ -215,6 +218,11 @@ pub fn resolve(project: &Layer, o: &Outer) -> Result<Effective> {
         }
     }
     Ok(out)
+}
+
+/// Whether `k` comes from a layer the project cannot loosen: the environment or an enforced key.
+pub fn fixed(e: &Effective, k: &str) -> bool {
+    matches!(e.get(k), Some((_, ENVIRONMENT | ENFORCED)))
 }
 
 /// `url` is `prefix` or below it on a `/` (or query) boundary, both compared as parsed URLs, as the

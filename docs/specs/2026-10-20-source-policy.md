@@ -37,6 +37,9 @@ first layer that sets a key wins:
    differs from an enforced one wins, with one warning per run on stderr naming the variable,
    both values and the file.
 3. `[policy]` of the project (or global) `skills.toml`.
+   A repository's own `min-release-age` (D15) replaces the policy value only when this layer
+   or a later one sets it; from layers 1 and 2 the value is a floor the repository may only
+   raise (D20).
 4. User config, keys not in `enforce`.
 5. Built-in defaults.
 

@@ -41,3 +41,27 @@ fn a_repository_can_set_its_own_min_release_age() {
     p.write("skills.toml", &p.read("skills.toml").replace("min-release-age = \"0\"", "min-release-age = 3"));
     assert!(p.expect(&["install"], 1).contains("repository internal: min-release-age must be a string"));
 }
+
+#[test]
+fn a_repository_cannot_go_below_a_fixed_min_release_age() {
+    let s = Server::start();
+    let z = || zipball(&[("SKILL.md", &skill_md("one"))]);
+    s.package(
+        "acme/one",
+        vec![
+            Ver { version: "1.1.0", time: Some(ago(1)), zip: z(), extra: None },
+            Ver { version: "1.0.0", time: Some(ago(240)), zip: z(), extra: None },
+        ],
+    );
+    let p = Project::new(&s);
+    p.write(
+        "skills.toml",
+        &format!(
+            "[repositories]\ninternal = {{ url = \"{}\", min-release-age = \"0\" }}\n[policy]\npackagist = false\n",
+            s.url("/packages.json")
+        ),
+    );
+    p.config("[policy]\nmin-release-age = \"3d\"\nenforce = [\"min-release-age\"]\n");
+    p.ok(&["add", "acme/one"]);
+    assert!(p.read("skills.lock").contains("version = \"1.0.0\""), "{}", p.read("skills.lock"));
+}
