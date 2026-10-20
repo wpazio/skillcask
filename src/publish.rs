@@ -8,7 +8,7 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
 use crate::bail;
-use crate::error::{Context, Error, MANIFEST, Result};
+use crate::error::{Context, Error, MANIFEST, Result, USAGE};
 use crate::manifest::valid_package_name;
 use crate::skill::{FileEntry, SKILL_MD, frontmatter, tree_hash, valid_name};
 use crate::version::{Stability, Version};
@@ -39,10 +39,10 @@ struct Found {
 pub fn publish(args: &PublishArgs) -> Result<()> {
     let base = args.base_url.as_deref().map(|b| b.trim_end_matches('/'));
     if base.is_some_and(|b| !b.starts_with("https://")) {
-        bail!(MANIFEST, "--base-url must be an https:// URL");
+        bail!(USAGE, "--base-url must be an https:// URL");
     }
     if base.is_none() && !(args.inline && args.dist_url.is_some()) {
-        bail!(MANIFEST, "--base-url is required unless both --inline and --dist-url are given");
+        bail!(USAGE, "--base-url is required unless both --inline and --dist-url are given");
     }
     let dist_url = match (&args.dist_url, base) {
         (Some(t), _) => t.clone(),
@@ -50,7 +50,7 @@ pub fn publish(args: &PublishArgs) -> Result<()> {
         (None, None) => unreachable!("checked above"),
     };
     if !dist_url.starts_with("https://") || !dist_url.contains("{name}") || !dist_url.contains("{version}") {
-        bail!(MANIFEST, "--dist-url must be an https:// URL containing {{name}} and {{version}}");
+        bail!(USAGE, "--dist-url must be an https:// URL containing {{name}} and {{version}}");
     }
     std::fs::create_dir_all(&args.out)?;
     let out = args.out.canonicalize()?;

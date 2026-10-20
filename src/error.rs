@@ -3,6 +3,8 @@ use std::fmt;
 /// What went wrong, as the exit code reports it (README: exit codes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Code {
+    /// The command line; shares exit 1 with `Manifest`, as the README's exit code table says.
+    Usage,
     /// skills.toml, skills.lock, a repository's metadata or a package's content.
     Manifest,
     Auth,
@@ -12,6 +14,7 @@ pub enum Code {
 }
 
 /// The spelling call sites use: `bail!(MANIFEST, …)`.
+pub const USAGE: Code = Code::Usage;
 pub const MANIFEST: Code = Code::Manifest;
 pub const AUTH: Code = Code::Auth;
 pub const NETWORK: Code = Code::Network;
@@ -21,7 +24,7 @@ pub const IO: Code = Code::Io;
 impl Code {
     pub fn exit(self) -> i32 {
         match self {
-            Code::Manifest => 1,
+            Code::Usage | Code::Manifest => 1,
             Code::Auth => 2,
             Code::Network => 3,
             Code::Hash => 4,
@@ -103,7 +106,7 @@ mod tests {
 
     #[test]
     fn exit_codes() {
-        for (code, exit) in [(MANIFEST, 1), (AUTH, 2), (NETWORK, 3), (HASH, 4), (IO, 5)] {
+        for (code, exit) in [(USAGE, 1), (MANIFEST, 1), (AUTH, 2), (NETWORK, 3), (HASH, 4), (IO, 5)] {
             assert_eq!(code.exit(), exit, "{code:?}");
         }
     }

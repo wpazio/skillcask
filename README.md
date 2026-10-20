@@ -226,7 +226,7 @@ Every command except `publish` takes `-g, --global`.
 | `publish --vendor v --base-url URL --out DIR [--inline] [--dist-url TPL] [paths…]` | Build a static Composer repository from a monorepo. |
 | `<other>` | Runs `skillcask-<other>` from `PATH`, like git and cargo plugins. |
 
-Exit codes: 0 ok, 1 manifest/lock/status problems, 2 authentication, 3 network, 4 hash mismatch,
+Exit codes: 0 ok, 1 usage, manifest, lock or status problems, 2 authentication, 3 network, 4 hash mismatch,
 5 IO or archive error.
 
 Output is coloured in a terminal (`NO_COLOR` turns it off, `CLICOLOR_FORCE` on) and errors name
