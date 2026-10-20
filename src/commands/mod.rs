@@ -57,3 +57,28 @@ fn say(line: &str) {
     let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
     ui::done(verb, rest);
 }
+
+#[cfg(test)]
+mod fixtures {
+    use std::collections::BTreeMap;
+
+    use crate::lock::{Dist, LockedSkill, Package};
+
+    /// A lock entry at 1.0.0 whose skills keep their upstream names.
+    pub fn pkg(name: &str, constraint: &str, repo: &str, skills: &[&str]) -> Package {
+        let skill = |s: &&str| LockedSkill { name: (*s).into(), from: None, path: (*s).into(), tree_sha256: String::new() };
+        Package {
+            name: name.into(),
+            constraint: constraint.into(),
+            github: None,
+            version: "1.0.0".into(),
+            repository: repo.into(),
+            dist: Dist { url: String::new(), reference: None },
+            dist_sha256: String::new(),
+            released: None,
+            selected: None,
+            requires: BTreeMap::new(),
+            skills: skills.iter().map(skill).collect(),
+        }
+    }
+}

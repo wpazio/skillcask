@@ -100,3 +100,146 @@ pub(super) fn fill_new_keys(m: &Manifest, lock: &mut Lock) -> bool {
     }
     filled
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::fixtures::pkg;
+    use crate::lock::LockedSkill;
+
+    const ACME: &str = "https://acme.example/packages.json";
+    const OTHER: &str = "https://other.example/packages.json";
+    const GH: &str = "https://api.github.com/repos/acme/a";
+
+    fn manifest(skills: &str) -> Manifest {
+        crate::manifest::parse(&format!("[repositories]\nacme = {{ url = \"{ACME}\" }}\n[skills]\n{skills}\n"), false).unwrap()
+    }
+
+    fn lock(packages: Vec<Package>) -> Lock {
+        Lock { packages }
+    }
+
+    #[test]
+    fn drift_names_the_first_difference() {
+        let m = manifest("\"acme/a\" = { version = \"^1.0\", repository = \"acme\", rename = { a = \"x\" } }");
+        let req = &m.skills[0];
+        assert_eq!(drift(&m, req, None).as_deref(), Some("not in skills.lock"), "missing entry");
+        // The constraint is reported before the repository, and both before the rename, when all differ.
+        let p = pkg("acme/a", "^2.0", OTHER, &["a"]);
+        assert_eq!(drift(&m, req, Some(&p)).as_deref(), Some("constraint changed from \"^2.0\" to \"^1.0\""), "constraint first");
+        let p = pkg("acme/a", "^1.0", OTHER, &["a"]);
+        assert_eq!(drift(&m, req, Some(&p)).as_deref(), Some("repository changed"), "repository before rename");
+        let mut p = pkg("acme/a", "^1.0", ACME, &["a"]);
+        assert_eq!(drift(&m, req, Some(&p)).as_deref(), Some("rename changed"), "rename last");
+        p.skills[0] = LockedSkill { name: "x".into(), from: Some("a".into()), ..p.skills[0].clone() };
+        assert_eq!(drift(&m, req, Some(&p)), None, "matching rename");
+    }
+
+    #[test]
+    fn drift_in_github_entries() {
+        let m = manifest("\"acme/a\" = { github = true, version = \"^1.0\" }");
+        let req = &m.skills[0];
+        // Only the path counts: the API base may differ between machines.
+        let mut p = pkg("acme/a", "^1.0", "https://ghe.example/api/v3/repos/acme/a", &["a"]);
+        p.github = Some(GitHub::Tags);
+        assert_eq!(drift(&m, req, Some(&p)), None, "same path, other API base");
+        p.github = Some(GitHub::Ref);
+        assert_eq!(drift(&m, req, Some(&p)).as_deref(), Some("changed from ref to version"), "mode differs");
+        // A lock written before `ref` existed matches either mode.
+        p.github = None;
+        assert_eq!(drift(&m, req, Some(&p)), None, "old lock without ref");
+    }
+
+    #[test]
+    fn drift_in_the_skill_selection() {
+        let m = manifest("\"acme/a\" = { version = \"^1.0\", skills = [\"a\"] }");
+        let p = pkg("acme/a", "^1.0", ACME, &["a", "b"]);
+        assert_eq!(drift(&m, &m.skills[0], Some(&p)).as_deref(), Some("skill selection changed"), "narrowed to one skill");
+        let all = manifest("\"acme/a\" = \"^1.0\"");
+        let mut p = pkg("acme/a", "^1.0", ACME, &["a"]);
+        p.selected = Some(vec!["a".into()]);
+        assert_eq!(drift(&all, &all.skills[0], Some(&p)).as_deref(), Some("skill selection changed"), "selection dropped");
+        // The selection names skills as the package calls them, before any rename.
+        let m = manifest("\"acme/a\" = { version = \"^1.0\", skills = [\"a\"], rename = { a = \"x\" } }");
+        let mut p = pkg("acme/a", "^1.0", ACME, &["x"]);
+        p.skills[0].from = Some("a".into());
+        assert_eq!(drift(&m, &m.skills[0], Some(&p)), None, "selection by upstream name");
+    }
+
+    #[test]
+    fn source_changed_compares_what_the_entry_names() {
+        let gh = "\"acme/a\" = { github = true, version = \"^1.0\" }";
+        let named = "\"acme/a\" = { version = \"^1.0\", repository = \"acme\" }";
+        // Without a repository any declared one keeps the entry; an undeclared one is a change.
+        let any = "\"acme/a\" = \"^1.0\"";
+        let cases = [
+            (gh, "https://ghe.example/api/v3/repos/acme/a", false),
+            (gh, "https://api.github.com/repos/acme/b", true),
+            (named, ACME, false),
+            (named, OTHER, true),
+            (any, ACME, false),
+            (any, OTHER, true),
+        ];
+        for (entry, repo, want) in cases {
+            let m = manifest(entry);
+            assert_eq!(source_changed(&m, &m.skills[0], &pkg("acme/a", "^1.0", repo, &[])), want, "{entry} locked at {repo}");
+        }
+    }
+
+    #[test]
+    fn reconcile_lists_needs_then_stale() {
+        let m = manifest("\"acme/a\" = \"^1.0\"");
+        let (needs, stale, why) = reconcile(&m, &m.skills, &Lock::default());
+        assert_eq!(needs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["acme/a"], "empty lock: needs");
+        assert_eq!(stale, Vec::<String>::new(), "empty lock: stale");
+        assert_eq!(why, ["acme/a: not in skills.lock"], "empty lock: why");
+
+        let orphan = lock(vec![pkg("acme/b", "^1.0", ACME, &["b"])]);
+        let (needs, stale, why) = reconcile(&m, &m.skills, &orphan);
+        assert_eq!(needs.len(), 1, "orphan: needs");
+        assert_eq!(stale, ["acme/b"], "orphan: stale");
+        assert_eq!(why, ["acme/a: not in skills.lock", "acme/b: in skills.lock but neither in skills.toml nor required"], "orphan: why");
+
+        let matching = lock(vec![pkg("acme/a", "^1.0", ACME, &["a"])]);
+        let (needs, stale, why) = reconcile(&m, &m.skills, &matching);
+        assert!(needs.is_empty(), "{needs:?}");
+        assert!(stale.is_empty(), "{stale:?}");
+        assert!(why.is_empty(), "{why:?}");
+    }
+
+    #[test]
+    fn drifted_skips_dependencies_and_keeps_orphans() {
+        let m = manifest("\"acme/a\" = \"^1.0\"");
+        let mut a = pkg("acme/a", "^1.0", ACME, &["a"]);
+        a.requires.insert("acme/dep".into(), "^1.0".into());
+        // The dependency drifts (locked at ^2.0) but has no manifest entry to leave alone; the orphan is stale.
+        let l = lock(vec![a, pkg("acme/dep", "^2.0", ACME, &["dep"]), pkg("acme/c", "^1.0", ACME, &["c"])]);
+        assert_eq!(drifted(&m, &l), BTreeSet::from(["acme/c".to_string()]));
+    }
+
+    #[test]
+    fn locked_repository_only_for_an_unchanged_composer_source() {
+        let gh = manifest("\"acme/a\" = { github = true, version = \"^1.0\" }");
+        assert!(locked_repository(&gh, &gh.skills[0], Some(&pkg("acme/a", "^1.0", GH, &[]))).is_none());
+        let m = manifest("\"acme/a\" = \"^1.0\"");
+        assert!(locked_repository(&m, &m.skills[0], None).is_none());
+        assert!(locked_repository(&m, &m.skills[0], Some(&pkg("acme/a", "^1.0", OTHER, &[]))).is_none());
+        assert_eq!(locked_repository(&m, &m.skills[0], Some(&pkg("acme/a", "^1.0", ACME, &[]))).map(|r| r.name.as_str()), Some("acme"));
+    }
+
+    #[test]
+    fn fill_new_keys_completes_matching_entries() {
+        let m =
+            manifest("\"acme/a\" = { version = \"^1.0\", skills = [\"b\", \"a\"] }\n\"acme/g\" = { github = true, version = \"^1.0\" }");
+        let mut l =
+            lock(vec![pkg("acme/a", "^1.0", ACME, &["a", "b"]), pkg("acme/g", "^1.0", "https://api.github.com/repos/acme/g", &["g"])]);
+        assert!(fill_new_keys(&m, &mut l));
+        assert_eq!(l.packages[0].selected.as_deref(), Some(&["a".to_string(), "b".to_string()][..]));
+        assert_eq!(l.packages[1].github, Some(GitHub::Tags));
+        assert!(!fill_new_keys(&m, &mut l), "nothing left to fill");
+        // A drifted entry is re-locked by `install`, not patched.
+        let mut l = lock(vec![pkg("acme/a", "^2.0", ACME, &["a", "b"])]);
+        assert!(!fill_new_keys(&m, &mut l));
+        assert_eq!(l.packages[0].selected, None);
+    }
+}
