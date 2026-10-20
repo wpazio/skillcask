@@ -290,11 +290,11 @@ fn main() {
     // clap exits 2 on usage errors, which here means authentication.
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         let _ = e.print();
-        std::process::exit(if e.use_stderr() { MANIFEST.into() } else { 0 });
+        std::process::exit(if e.use_stderr() { MANIFEST.exit() } else { 0 });
     });
     ui::init(cli.agent);
     if let Err(e) = run(cli) {
         ui::error(&e.msg, e.hint.as_deref());
-        std::process::exit(e.code.into());
+        std::process::exit(e.code.exit());
     }
 }
