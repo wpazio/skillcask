@@ -119,6 +119,11 @@ fn expand(versions: &[Value], minified: bool) -> Vec<Map<String, Value>> {
     out
 }
 
+/// A skill package: `type` is `ai-agent-skill`, or `extra.ai-agent-skill` names its skills.
+fn is_skill(m: &Map<String, Value>) -> bool {
+    m.get("type").and_then(Value::as_str) == Some("ai-agent-skill") || m.get("extra").and_then(|e| e.get("ai-agent-skill")).is_some()
+}
+
 /// Composer writes `time` with or without an offset; without one it is UTC.
 fn release_time(t: &str) -> Option<Timestamp> {
     t.parse().ok().or_else(|| t.parse::<jiff::civil::DateTime>().ok()?.to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp()))
@@ -134,18 +139,17 @@ fn candidates(package: &str, versions: Vec<Map<String, Value>>, base: &Url) -> V
     };
     let mut out = Vec::new();
     for m in versions {
-        let extra = m.get("extra").and_then(|e| e.get("ai-agent-skill"));
-        if s(&m, &["type"]).as_deref() != Some("ai-agent-skill") && extra.is_none() {
+        if !is_skill(&m) {
             continue;
         }
+        let extra = m.get("extra").and_then(|e| e.get("ai-agent-skill"));
         let Some(version) = s(&m, &["version"]) else { continue };
         let Some(parsed) = s(&m, &["version_normalized"]).and_then(|n| Version::parse(&n)).or_else(|| Version::parse(&version)) else {
             continue;
         };
         // Userinfo of the repository URL must not end up in the lock.
         let dist_url = s(&m, &["dist", "url"]).and_then(|u| base.join(&u).ok()).map(|mut u| {
-            let _ = u.set_username("");
-            let _ = u.set_password(None);
+            crate::http::strip_userinfo(&mut u);
             u
         });
         let (Some("zip"), Some(url)) = (s(&m, &["dist", "type"]).as_deref(), dist_url) else {
@@ -313,11 +317,7 @@ impl<'a> Registry<'a> {
         let mut out = Vec::new();
         for n in names {
             let Some((list, _)) = self.metadata(repo, &n)? else { continue };
-            let skill = list.iter().find(|m| {
-                m.get("type").and_then(Value::as_str) == Some("ai-agent-skill")
-                    || m.get("extra").and_then(|e| e.get("ai-agent-skill")).is_some()
-            });
-            if let Some(m) = skill {
+            if let Some(m) = list.iter().find(|m| is_skill(m)) {
                 out.push((n, m.get("description").and_then(Value::as_str).unwrap_or("").to_string()));
             }
         }
@@ -477,6 +477,21 @@ mod tests {
         let now: Timestamp = "2026-10-19T12:00:00Z".parse().unwrap();
         let e = select(&c, "acme/x", "^1.1", SignedDuration::MAX, now).unwrap_err();
         assert!(e.msg.contains("min-release-age"), "{}", e.msg);
+    }
+
+    #[test]
+    fn skill_packages_by_type_or_extra() {
+        for (meta, skill) in [
+            (json!({"type": "ai-agent-skill"}), true),
+            (json!({"type": "library", "extra": {"ai-agent-skill": "skills/a/SKILL.md"}}), true),
+            (json!({"extra": {"ai-agent-skill": ["a/SKILL.md"]}}), true),
+            (json!({"type": "library"}), false),
+            (json!({"type": "ai-agent-skill-x", "extra": {"other": 1}}), false),
+            (json!({"type": ["ai-agent-skill"]}), false),
+            (json!({}), false),
+        ] {
+            assert_eq!(is_skill(meta.as_object().unwrap()), skill, "{meta}");
+        }
     }
 
     #[test]

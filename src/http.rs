@@ -178,11 +178,16 @@ fn redact_raw(s: &str) -> String {
     out
 }
 
+/// Drops the `user:password@` part; credentials come from the request header instead.
+pub fn strip_userinfo(u: &mut Url) {
+    let _ = u.set_username("");
+    let _ = u.set_password(None);
+}
+
 /// URL safe to print: no userinfo, no query (tokens sometimes travel there).
 pub fn redact(url: &Url) -> String {
     let mut u = url.clone();
-    let _ = u.set_username("");
-    let _ = u.set_password(None);
+    strip_userinfo(&mut u);
     if u.query().is_some() {
         u.set_query(Some("…"));
     }
@@ -240,8 +245,7 @@ impl Http {
             }
             let inline =
                 (!cur.username().is_empty()).then(|| Cred::Basic(cur.username().to_string(), cur.password().unwrap_or("").to_string()));
-            let _ = cur.set_username("");
-            let _ = cur.set_password(None);
+            strip_userinfo(&mut cur);
             let mut req = self.agent.get(cur.as_str());
             if let Some(c) = inline.or_else(|| self.auth.lookup(&cur)) {
                 let (k, v) = c.header();
