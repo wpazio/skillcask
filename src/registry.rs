@@ -35,9 +35,15 @@ const SEARCH_LIMIT: usize = 30;
 
 type Versions = Vec<Map<String, Value>>;
 
+/// A repository's `packages.json`, read once per run.
+struct Root {
+    url: Url,
+    json: Value,
+}
+
 pub struct Registry<'a> {
     http: &'a Http,
-    roots: RefCell<HashMap<String, Rc<(Url, Value)>>>,
+    roots: RefCell<HashMap<String, Rc<Root>>>,
 }
 
 fn packages_url(repo: &Repository) -> Result<Url> {
@@ -206,7 +212,7 @@ impl<'a> Registry<'a> {
         Registry { http, roots: RefCell::new(HashMap::new()) }
     }
 
-    fn root(&self, repo: &Repository) -> Result<Rc<(Url, Value)>> {
+    fn root(&self, repo: &Repository) -> Result<Rc<Root>> {
         if let Some(r) = self.roots.borrow().get(&repo.url) {
             return Ok(r.clone());
         }
@@ -215,7 +221,7 @@ impl<'a> Registry<'a> {
             .http
             .get_json(url.as_str())?
             .ok_or_else(|| Error::new(NETWORK, format!("repository {}: {} not found", repo.name, crate::http::redact(&url))))?;
-        let r = Rc::new((url, json));
+        let r = Rc::new(Root { url, json });
         self.roots.borrow_mut().insert(repo.url.clone(), r.clone());
         Ok(r)
     }
@@ -227,10 +233,10 @@ impl<'a> Registry<'a> {
     /// Every version's metadata, expanded, and the URL relative dist URLs resolve against.
     fn metadata(&self, repo: &Repository, package: &str) -> Result<Option<(Versions, Url)>> {
         let root = self.root(repo)?;
-        if let Some(list) = inline(&root.1, package) {
-            return Ok(Some((expand(&list, false), root.0.clone())));
+        if let Some(list) = inline(&root.json, package) {
+            return Ok(Some((expand(&list, false), root.url.clone())));
         }
-        let Some(meta) = metadata_url(&root.1, &root.0, package)? else { return Ok(None) };
+        let Some(meta) = metadata_url(&root.json, &root.url, package)? else { return Ok(None) };
         let Some(p2) = self.http.get_json(meta.as_str())? else { return Ok(None) };
         let Some(list) = p2.get("packages").and_then(|p| p.get(package)).and_then(Value::as_array) else { return Ok(None) };
         let minified = p2.get("minified").and_then(Value::as_str) == Some("composer/2.0");
@@ -303,7 +309,7 @@ impl<'a> Registry<'a> {
         let root = self.root(repo)?;
         let q = query.to_lowercase();
         let mut names: Vec<String> = root
-            .1
+            .json
             .get("available-packages")
             .and_then(Value::as_array)
             .into_iter()
@@ -311,11 +317,11 @@ impl<'a> Registry<'a> {
             .filter_map(Value::as_str)
             .map(String::from)
             .collect();
-        names.extend(root.1.get("packages").and_then(Value::as_object).into_iter().flat_map(|m| m.keys().cloned()));
-        for (tpl, h) in root.1.get("provider-includes").and_then(Value::as_object).into_iter().flatten() {
+        names.extend(root.json.get("packages").and_then(Value::as_object).into_iter().flat_map(|m| m.keys().cloned()));
+        for (tpl, h) in root.json.get("provider-includes").and_then(Value::as_object).into_iter().flatten() {
             let Some(hash) = h.get("sha256").and_then(Value::as_str) else { continue };
             let url = root
-                .0
+                .url
                 .join(&tpl.replace("%hash%", hash))
                 .map_err(|e| Error::new(NETWORK, format!("bad provider-includes {tpl:?}: {e}")))?;
             let providers = self.http.get_json(url.as_str())?;
