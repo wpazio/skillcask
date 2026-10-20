@@ -213,3 +213,29 @@ pub fn remove(ctx: &Ctx, names: &[String]) -> Result<()> {
     lock.save(&ctx.s.config)?;
     ctx.materialize(&Manifest::load(&ctx.s.config, ctx.s.global)?, &lock, &old, prepared)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lock::Dist;
+
+    fn candidate(version: &str) -> Candidate {
+        Candidate {
+            name: "acme/a".into(),
+            version: version.into(),
+            parsed: version::Version::parse(version).unwrap(),
+            time: None,
+            dist: Dist { url: String::new(), reference: None },
+            dist_shasum: None,
+            skill_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn default_constraint_follows_the_ranges_policy() {
+        let cases = [("1.2.3", true, "^1.2"), ("0.0.3", true, "^0.0.3"), ("v1.2.3", false, "1.2.3"), ("1.2", false, "1.2.0")];
+        for (version, allow_ranges, want) in cases {
+            assert_eq!(default_constraint(&candidate(version), allow_ranges), want, "{version} with allow-ranges = {allow_ranges}");
+        }
+    }
+}

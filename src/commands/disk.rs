@@ -138,3 +138,49 @@ pub(super) fn set_modes(modes: &mut BTreeSet<String>, name: &str, files: &[FileE
 pub(super) fn managed_paths(managed: &BTreeSet<String>, targets: &[String]) -> Vec<String> {
     managed.iter().flat_map(|n| std::iter::once(format!("{STORE}/{n}")).chain(targets.iter().map(move |t| format!("{t}/{n}")))).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::fixtures::pkg;
+
+    #[test]
+    fn set_modes_replaces_one_skill_with_its_exec_files() {
+        let mut modes = BTreeSet::from(["a/old".to_string(), "ab/x".to_string()]);
+        let files = [FileEntry::new("run.sh".into(), true, b""), FileEntry::new("SKILL.md".into(), false, b"")];
+        set_modes(&mut modes, "a", &files);
+        assert_eq!(modes, BTreeSet::from(["a/run.sh".to_string(), "ab/x".to_string()]));
+        set_modes(&mut modes, "a", &[]);
+        assert_eq!(modes, BTreeSet::from(["ab/x".to_string()]));
+    }
+
+    #[test]
+    fn managed_paths_lists_the_store_before_the_targets() {
+        let managed = BTreeSet::from(["a".to_string(), "b".to_string()]);
+        let targets = [".claude/skills".to_string()];
+        assert_eq!(managed_paths(&managed, &targets), [".agents/skills/a", ".claude/skills/a", ".agents/skills/b", ".claude/skills/b"]);
+    }
+
+    #[test]
+    fn link_plan_puts_locals_into_the_store_first() {
+        let m = crate::manifest::parse("[agents]\ntargets = [\".claude/skills\", \".junie/skills\"]\n", false).unwrap();
+        let p = pkg("acme/a", "^1.0", "https://acme.example/packages.json", &["locked"]);
+        let locked = BTreeMap::from([("locked".to_string(), (&p, &p.skills[0]))]);
+        let hand = BTreeSet::from(["hand".to_string()]);
+        let locals = BTreeSet::from(["local".to_string()]);
+        let plan: Vec<String> =
+            link_plan(&m, &locked, &hand, &locals).iter().map(|(at, source, n)| format!("{at}/{n} -> {source}/{n}")).collect();
+        assert_eq!(
+            plan,
+            [
+                ".agents/skills/local -> .skills/local",
+                ".claude/skills/locked -> .agents/skills/locked",
+                ".junie/skills/locked -> .agents/skills/locked",
+                ".claude/skills/hand -> .agents/skills/hand",
+                ".junie/skills/hand -> .agents/skills/hand",
+                ".claude/skills/local -> .agents/skills/local",
+                ".junie/skills/local -> .agents/skills/local",
+            ]
+        );
+    }
+}
