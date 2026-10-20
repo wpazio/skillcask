@@ -1,25 +1,33 @@
+mod disk;
+mod drift;
+mod fetch;
+
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path};
 
 use jiff::Timestamp;
-use sha1::Sha1;
-use sha2::{Digest, Sha256};
 
-use crate::archive::{self, Limits};
+use crate::archive::Limits;
 use crate::bail;
 use crate::deps;
-use crate::error::{Context, Error, HASH, MANIFEST, NETWORK, Result, USAGE};
+use crate::error::{Context, Error, HASH, MANIFEST, Result, USAGE};
 use crate::github;
 use crate::http::Http;
-use crate::lock::{Dist, Lock, LockedSkill, Package};
+use crate::lock::{Lock, LockedSkill, Package};
 use crate::manifest::{self, GitHub, Manifest, Repository, SkillReq};
 use crate::project::{self, LinkState, STORE};
 use crate::registry::{self, Candidate, Registry};
 use crate::scope::Scope;
-use crate::skill::{self, FileEntry};
+use crate::skill;
 use crate::ui;
 use crate::version::{self, Constraint};
+
+use disk::{
+    hand_written, installed_ok, kept, link_plan, locked_names, locked_skill, managed_paths, not_ours, set_modes, shadows, tree_on_disk,
+};
+use drift::{drift, drifted, fill_new_keys, locked_repository, reconcile, source_changed};
+use fetch::{Fetched, skill_md_of};
 
 pub struct Ctx {
     pub s: Scope,
@@ -28,42 +36,6 @@ pub struct Ctx {
     /// stdin and stderr are terminals and CI is unset: conflicts may prompt for a rename.
     pub interactive: bool,
     http: OnceCell<Http>,
-}
-
-/// A downloaded, verified and unpacked dist, kept so `add`/`update` do not download twice.
-struct Fetched {
-    dir: tempfile::TempDir,
-    entries: Vec<FileEntry>,
-    links: Vec<archive::Link>,
-    skipped: Vec<archive::Skipped>,
-}
-
-impl Fetched {
-    fn skill_files(&self, package: &str, skill: &str, dir: &str) -> Result<Vec<FileEntry>> {
-        let prefix = if dir.is_empty() { String::new() } else { format!("{}/", dir.trim_end_matches('/')) };
-        if let Some(x) = self.skipped.iter().find(|x| x.path.starts_with(&prefix)) {
-            bail!(crate::error::IO, "{package}: {}", x.why);
-        }
-        if let Some(l) = archive::bad_link_in(&self.links, dir) {
-            bail!(
-                crate::error::IO,
-                "archive: {package}: skill {skill} contains a symlink {} that does not point to a file inside the skill",
-                l.path
-            );
-        }
-        Ok(archive::subtree(&self.entries, dir))
-    }
-
-    /// The skill's files as installed under `to`, and the renamed SKILL.md if it has one. The
-    /// extracted dir is left alone: nested skills and skills sharing a dir read the same files.
-    fn renamed_files(&self, mut files: Vec<FileEntry>, dir: &str, to: &str) -> Result<(Vec<FileEntry>, Option<String>)> {
-        let Some(e) = files.iter_mut().find(|e| e.path == skill::SKILL_MD) else {
-            return Ok((files, None));
-        };
-        let new = skill::rename_frontmatter(&std::fs::read_to_string(self.dir.path().join(dir).join(skill::SKILL_MD))?, to);
-        *e = FileEntry::new(e.path.clone(), e.exec, new.as_bytes());
-        Ok((files, Some(new)))
-    }
 }
 
 impl Ctx {
@@ -85,28 +57,6 @@ impl Ctx {
         } else {
             manifest::layered(manifest::template(self.s.global), self.s.global)
         }
-    }
-
-    fn fetch(&self, name: &str, dist: &Dist, expected: Option<&str>, shasum: Option<&str>) -> Result<(String, Fetched)> {
-        let bytes = self
-            .http()?
-            .get(&dist.url, self.limits.download)?
-            .ok_or_else(|| Error::new(NETWORK, format!("{name}: dist archive not found (404)")))?;
-        let sha = hex::encode(Sha256::digest(&bytes));
-        if let Some(exp) = expected
-            && exp != sha
-        {
-            bail!(HASH, "{name}: downloaded archive has sha256 {sha}, skills.lock expects {exp}");
-        }
-        if let Some(s) = shasum {
-            let sha1 = hex::encode(Sha1::digest(&bytes));
-            if !s.eq_ignore_ascii_case(&sha1) {
-                bail!(HASH, "{name}: downloaded archive has sha1 {sha1}, the repository metadata says {s}");
-            }
-        }
-        let dir = project::temp_dir(&self.s)?;
-        let x = archive::extract(&bytes, dir.path(), &self.limits).ctx(name)?;
-        Ok((sha, Fetched { dir, entries: x.files, links: x.links, skipped: x.skipped }))
     }
 
     /// `locked`: the entry's lock entry before this command, if any.
@@ -672,82 +622,6 @@ fn ask(question: &str, suggestion: Option<&str>, taken: &BTreeSet<String>) -> Re
     }
 }
 
-/// Personal skills with the same name as project ones. Claude Code runs the personal one;
-/// Codex lists both. Empty for the global scope.
-fn shadows<'a>(s: &Scope, m: &Manifest, names: impl IntoIterator<Item = &'a String>) -> Vec<String> {
-    let Some(home) = crate::scope::home().filter(|_| !s.global) else { return Vec::new() };
-    let mut out = Vec::new();
-    for n in names {
-        for d in std::iter::once(STORE).chain(m.targets.iter().map(String::as_str)) {
-            if home.join(d).join(n).symlink_metadata().is_ok() {
-                out.push(if d == ".claude/skills" {
-                    format!("{n}: ~/{d}/{n} shadows the project skill in Claude Code")
-                } else {
-                    format!("{n}: ~/{d}/{n} also exists; the agent may show both")
-                });
-            }
-        }
-    }
-    out
-}
-
-fn locked_names(lock: &Lock) -> Result<BTreeMap<String, (&Package, &LockedSkill)>> {
-    let mut out: BTreeMap<String, (&Package, &LockedSkill)> = BTreeMap::new();
-    for (p, s) in lock.skills() {
-        if let Some((other, _)) = out.insert(s.name.clone(), (p, s)) {
-            bail!(MANIFEST, "skill {:?} is provided by both {} and {}", s.name, other.name, p.name);
-        }
-    }
-    Ok(out)
-}
-
-/// A target entry skillcask must neither replace nor repair. A symlink pointing elsewhere is the
-/// user's or another tool's, unless the block manages the name or it leads into the store or the
-/// project skills.
-fn not_ours(s: &Scope, m: &Manifest, at: &str, n: &str, state: &LinkState, old_managed: &BTreeSet<String>) -> bool {
-    match state {
-        LinkState::Foreign => true,
-        LinkState::Wrong => {
-            let path = s.root.join(at).join(n);
-            path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
-                && !old_managed.contains(n)
-                && !project::points_into(s, &path, STORE)
-                && (s.global || !project::points_into(s, &path, &m.local))
-        }
-        _ => false,
-    }
-}
-
-fn hand_written(s: &Scope, lock: &Lock, old_managed: &BTreeSet<String>, locals: &BTreeSet<String>) -> Result<BTreeSet<String>> {
-    if s.global {
-        return Ok(BTreeSet::new());
-    }
-    let locked: BTreeSet<&str> = lock.skills().map(|(_, sk)| sk.name.as_str()).collect();
-    Ok(project::store_names(s)?
-        .into_iter()
-        .filter(|n| !locked.contains(n.as_str()) && !old_managed.contains(n) && !locals.contains(n))
-        .collect())
-}
-
-/// Every link as (directory, source directory, name): project skills into the store, then all
-/// skills from the store into each agent target.
-fn link_plan<'a>(
-    m: &'a Manifest,
-    locked: &BTreeMap<String, (&Package, &LockedSkill)>,
-    hand: &BTreeSet<String>,
-    locals: &BTreeSet<String>,
-) -> Vec<(String, &'a str, String)> {
-    let mut plan: Vec<(String, &str, String)> = locals.iter().map(|n| (STORE.to_string(), m.local.as_str(), n.clone())).collect();
-    for n in locked.keys().chain(hand).chain(locals) {
-        plan.extend(m.targets.iter().map(|t| (t.clone(), STORE, n.clone())));
-    }
-    plan
-}
-
-fn locked_skill<'a>(lock: &'a Lock, name: &str) -> Option<(&'a Package, &'a LockedSkill)> {
-    lock.skills().find(|(_, sk)| sk.name == name)
-}
-
 /// What proves a store dir is skillcask's.
 enum Owned {
     /// Names in the machine-local record (the block is committed, so a clone has it too).
@@ -785,94 +659,6 @@ fn store_conflict(s: &Scope, p: &Package, sk: &LockedSkill, old: &Lock, owned: &
     } else {
         Some((format!("{shown} was modified after skillcask installed it; {away}"), false))
     }
-}
-
-/// Managed names no longer locked whose store dir is not what the old lock installed: modified,
-/// or never installed by skillcask (the block is committed and shared). They are not deleted.
-fn kept(s: &Scope, lock: &Lock, old: &Lock, old_managed: &BTreeSet<String>) -> BTreeSet<String> {
-    old_managed
-        .iter()
-        .filter(|n| locked_skill(lock, n).is_none())
-        .filter(|n| project::store_dir(s, n).symlink_metadata().is_ok_and(|m| !m.file_type().is_symlink()))
-        .filter(|n| {
-            let want = locked_skill(old, n).map(|(_, sk)| sk.tree_sha256.as_str());
-            tree_on_disk(s, n, want.as_slice()).as_deref() != want
-        })
-        .cloned()
-        .collect()
-}
-
-/// `<dir>/SKILL.md`, where `requires:` is read from both at lock and at install time; empty when
-/// the skill names another file.
-fn skill_md_of(dir: &Path) -> String {
-    std::fs::read_to_string(dir.join(skill::SKILL_MD)).unwrap_or_default()
-}
-
-fn installed_ok(s: &Scope, sk: &LockedSkill) -> bool {
-    tree_on_disk(s, &sk.name, &[&sk.tree_sha256]).is_some_and(|h| h == sk.tree_sha256)
-}
-
-/// `expect`: hashes the caller compares with. HFS+ stores names decomposed, so with a non-ASCII
-/// path the NFC and NFD spellings are tried too, and the one matching `expect` wins.
-fn tree_on_disk(s: &Scope, name: &str, expect: &[&str]) -> Option<String> {
-    let dir = project::store_dir(s, name);
-    let mut entries = skill::scan_dir(&dir).ok().filter(|_| dir.is_dir())?;
-    if !cfg!(unix) {
-        let modes = project::read_modes(s);
-        for e in &mut entries {
-            e.exec = modes.contains(&format!("{name}/{}", e.path));
-        }
-    }
-    let raw = skill::tree_hash(&entries);
-    if expect.contains(&raw.as_str()) || entries.iter().all(|e| e.path.is_ascii()) {
-        return Some(raw);
-    }
-    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
-    let nfd = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd();
-    let spelled = |f: &dyn Fn(&str) -> String| {
-        skill::tree_hash(&entries.iter().map(|e| FileEntry { path: f(&e.path), ..e.clone() }).collect::<Vec<_>>())
-    };
-    [spelled(&|p| nfc.normalize(p).into_owned()), spelled(&|p| nfd.normalize(p).into_owned())]
-        .into_iter()
-        .find(|h| expect.contains(&h.as_str()))
-        .or(Some(raw))
-}
-
-fn set_modes(modes: &mut BTreeSet<String>, name: &str, files: &[FileEntry]) {
-    let prefix = format!("{name}/");
-    modes.retain(|l| !l.starts_with(&prefix));
-    modes.extend(files.iter().filter(|f| f.exec).map(|f| format!("{prefix}{}", f.path)));
-}
-
-fn managed_paths(managed: &BTreeSet<String>, targets: &[String]) -> Vec<String> {
-    managed.iter().flat_map(|n| std::iter::once(format!("{STORE}/{n}")).chain(targets.iter().map(move |t| format!("{t}/{n}")))).collect()
-}
-
-/// Manifest entries that need resolving, lock entries to drop, and why.
-/// `reqs`: the effective requirements, `deps::wanted`.
-fn reconcile(m: &Manifest, reqs: &[SkillReq], lock: &Lock) -> (Vec<SkillReq>, Vec<String>, Vec<String>) {
-    let (mut needs, mut stale, mut why) = (Vec::new(), Vec::new(), Vec::new());
-    for req in reqs {
-        if let Some(r) = drift(m, req, lock.get(&req.name)) {
-            why.push(format!("{}: {r}", req.name));
-            needs.push(req.clone());
-        }
-    }
-    for p in &lock.packages {
-        if !reqs.iter().any(|r| r.name == p.name) {
-            why.push(format!("{}: in skills.lock but neither in skills.toml nor required", p.name));
-            stale.push(p.name.clone());
-        }
-    }
-    (needs, stale, why)
-}
-
-/// Manifest entries that drift from `lock`, and lock entries nobody wants: commands that do not
-/// own them leave them alone.
-fn drifted(m: &Manifest, lock: &Lock) -> BTreeSet<String> {
-    let Ok(w) = deps::wanted(m, lock) else { return BTreeSet::new() };
-    let (needs, stale, _) = reconcile(m, &w.reqs, lock);
-    needs.into_iter().map(|r| r.name).filter(|n| m.skill(n).is_some()).chain(stale).collect()
 }
 
 fn required_by(w: &deps::Wanted, name: &str) -> String {
@@ -920,44 +706,6 @@ fn settle_deps(
     bail!(MANIFEST, "dependencies do not settle after {MAX_ROUNDS} rounds; check for requirements that keep changing each other")
 }
 
-/// Why the lock entry does not match the manifest entry. Keys a lock may lack (written by an
-/// older version) count as matching: absent `selected` is all skills, absent `ref` any mode.
-fn drift(m: &Manifest, req: &SkillReq, p: Option<&Package>) -> Option<String> {
-    let Some(p) = p else { return Some("not in skills.lock".into()) };
-    if p.constraint != req.constraint {
-        return Some(format!("constraint changed from {:?} to {:?}", p.constraint, req.constraint));
-    }
-    if source_changed(m, req, p) {
-        return Some("repository changed".into());
-    }
-    let mode = |g: GitHub| if g == GitHub::Ref { "ref" } else { "version" };
-    if let (Some(g), Some(l)) = (req.github, p.github)
-        && l != g
-    {
-        return Some(format!("changed from {} to {}", mode(l), mode(g)));
-    }
-    let upstream: BTreeSet<&String> = p.skills.iter().map(|s| s.from.as_ref().unwrap_or(&s.name)).collect();
-    let selection_changed = match &req.skills {
-        Some(sel) => sel.iter().collect::<BTreeSet<_>>() != upstream,
-        None => p.selected.is_some(),
-    };
-    if selection_changed {
-        return Some("skill selection changed".into());
-    }
-    let renamed: BTreeMap<&String, &String> = p.skills.iter().filter_map(|s| s.from.as_ref().map(|f| (f, &s.name))).collect();
-    if renamed != req.rename.iter().collect() {
-        return Some("rename changed".into());
-    }
-    None
-}
-
-/// The repository a locked entry must be resolved in, unless its source changed. Searching the
-/// others would let a public package with the same name replace a private one.
-fn locked_repository<'a>(m: &'a Manifest, req: &SkillReq, locked: Option<&Package>) -> Option<&'a Repository> {
-    let p = locked.filter(|p| req.github.is_none() && !source_changed(m, req, p))?;
-    m.repositories.iter().find(|r| r.url == p.repository)
-}
-
 fn find(reg: &Registry, m: &Manifest, req: &SkillReq, locked: Option<&Package>) -> Result<(Repository, Vec<Candidate>)> {
     // A blocked repository fails here; searching the others could pick a namesake elsewhere.
     let blocked = |r: &Repository| m.refuses(&r.url).map(|why| Error::new(MANIFEST, format!("{}: {why}", req.name)));
@@ -995,15 +743,6 @@ fn default_constraint(c: &Candidate, allow_ranges: bool) -> String {
     } else {
         let [a, b, p, _] = c.parsed.parts;
         format!("{a}.{b}.{p}")
-    }
-}
-
-fn source_changed(m: &Manifest, req: &SkillReq, p: &Package) -> bool {
-    match (req.github, &req.repository) {
-        // Only the path: the API base may differ between machines (GitHub Enterprise, a proxy).
-        (Some(_), _) => !p.repository.ends_with(&format!("/repos/{}", req.name)),
-        (None, Some(r)) => m.repository(r).is_some_and(|r| r.url != p.repository),
-        (None, None) => !m.repositories.iter().any(|r| r.url == p.repository),
     }
 }
 
@@ -1219,29 +958,6 @@ pub fn install(ctx: &Ctx, frozen: bool) -> Result<()> {
         lock.save(&ctx.s.config)?;
     }
     Ok(())
-}
-
-/// Adds `selected` and `ref` to entries of a lock written before those keys existed.
-fn fill_new_keys(m: &Manifest, lock: &mut Lock) -> bool {
-    let mut filled = false;
-    for p in &mut lock.packages {
-        let Some(req) = m.skill(&p.name).filter(|r| drift(m, r, Some(p)).is_none()) else { continue };
-        if p.selected.is_none()
-            && let Some(sel) = &req.skills
-        {
-            let mut sel = sel.clone();
-            sel.sort();
-            p.selected = Some(sel);
-            filled = true;
-        }
-        if p.github.is_none()
-            && let Some(g) = req.github
-        {
-            p.github = Some(g);
-            filled = true;
-        }
-    }
-    filled
 }
 
 pub fn update(ctx: &Ctx, names: &[String]) -> Result<()> {
