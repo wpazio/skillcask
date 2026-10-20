@@ -64,7 +64,7 @@ fn key(k: &str) -> Option<&'static str> {
 /// repository name, checked against `[repositories]` by the manifest.
 fn check_source(s: &str, names: bool) -> std::result::Result<(), String> {
     let name = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
-    if matches!(s, "packagist" | "github") || s.starts_with("https://") && s.len() > "https://".len() || names && name {
+    if matches!(s, "packagist" | "github") || s.starts_with("https://") && url::Url::parse(s).is_ok() || names && name {
         return Ok(());
     }
     Err(if name {
@@ -242,9 +242,23 @@ pub fn repository_floor(o: &Outer, url: &str, enforced: SignedDuration) -> Signe
     o.config.repository_ages.iter().filter(|(p, _)| under(url, p)).max_by_key(|(p, _)| p.len()).map_or(enforced, |(_, a)| *a)
 }
 
-/// `url` is `prefix` or below it on a `/` (or query) boundary.
+/// `url` is `prefix` or below it on a `/` (or query) boundary, both compared as parsed URLs, as the
+/// request is made: scheme, host and port equal, `..`, `%2e%2e` and `\` already resolved. Below the
+/// prefix a `..` behind `%2F` or `%5C`, or with a path parameter (`..;v=1`), is refused too, for
+/// servers that decode or strip parameters before resolving. A prefix with a query matches only
+/// itself; a side that does not parse matches nothing.
 pub fn under(url: &str, prefix: &str) -> bool {
-    url == prefix || url.starts_with(prefix) && (prefix.ends_with('/') || url[prefix.len()..].starts_with(['/', '?']))
+    let (Ok(u), Ok(p)) = (url::Url::parse(url), url::Url::parse(prefix)) else { return false };
+    if u.origin() != p.origin() {
+        return false;
+    }
+    if p.query().is_some() {
+        return u.as_str() == p.as_str();
+    }
+    let (path, base) = (u.path(), p.path());
+    let inside = path == base || path.starts_with(base) && (base.ends_with('/') || path[base.len()..].starts_with('/'));
+    let dotdot = |s: &str| s.split(';').next() == Some("..");
+    inside && !percent_encoding::percent_decode_str(&path[base.len()..]).decode_utf8_lossy().split(['/', '\\']).any(dotdot)
 }
 
 #[cfg(test)]
@@ -286,6 +300,7 @@ mod tests {
     fn rejects_bad_config() {
         assert!(cfg("[policy]\nallow-sources = [\"acme\"]").unwrap_err().msg.contains("only accepted in skills.toml"));
         assert!(cfg("[policy]\nallow-ranges = 1").is_err());
+        assert!(cfg("[policy]\nallow-sources = [\"https://exa mple.com/\"]").is_err());
         assert!(cfg("[policy]\nmin-release-age = 3").is_err());
         assert!(cfg("[policy]\ntypo = true").unwrap_err().msg.contains("unknown key"));
         assert!(cfg("[policy]\nenforce = [\"packagist\"]").unwrap_err().msg.contains("does not set"));
@@ -320,5 +335,30 @@ mod tests {
         assert!(!under("https://git.example.com.evil/a", "https://git.example.com"));
         assert!(!under("https://api.github.com/repos/acmex/r", "https://api.github.com/repos/acme"));
         assert!(under("https://api.github.com/repos/acme/r", "https://api.github.com/repos/acme"));
+        assert!(under("https://git.example.com/raw?ref=main", "https://git.example.com/raw"));
+        assert!(under("https://GIT.example.com:443/a", "https://git.example.com/"));
+        assert!(!under("https://git.example.com:8443/a", "https://git.example.com/"));
+        assert!(!under("not a url", "https://git.example.com/"));
+    }
+
+    #[test]
+    fn dot_segments_do_not_escape_a_prefix() {
+        let allowed = "https://git.example.com/api/v4/group/42/";
+        for escape in [
+            "../../projects/666/packages.json",
+            "%2e%2e/%2E%2E/projects/666/",
+            ".%2e/x",
+            "a/..\\..\\..\\x",
+            "..%2F..%2Fx",
+            "..%5cx",
+            "%2e%2e%2fx",
+            "..;/x",
+            "a/..;v=1/..;/x",
+            "%2e%2e;%2fx",
+        ] {
+            assert!(!under(&format!("{allowed}{escape}"), allowed), "{escape}");
+        }
+        assert!(under(&format!("{allowed}a/../b/packages.json"), allowed));
+        assert!(under("https://git.example.com/api/v4/projects/group%2Fproj/packages.json", "https://git.example.com/api/v4/"));
     }
 }

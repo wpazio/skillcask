@@ -279,6 +279,13 @@ impl Project {
         self.expect(&a, code)
     }
 
+    /// Writes the user `config.toml` (D18).
+    pub fn config(&self, text: &str) {
+        let dir = self.home().join(".config/skillcask");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), text).unwrap();
+    }
+
     pub fn global_manifest(&self, server: &Server, skills: &str) {
         let dir = self.home().join(".config/skillcask");
         std::fs::create_dir_all(&dir).unwrap();
