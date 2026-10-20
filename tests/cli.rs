@@ -386,7 +386,7 @@ fn doctor_repairs_links_index_and_block() {
     p.ok(&["doctor", "--fix"]);
     p.ok(&["doctor"]);
     assert!(p.exists(".claude/skills/one/SKILL.md"));
-    assert!(git(p.path(), &["ls-files"]).is_empty());
+    assert_eq!(git(p.path(), &["ls-files"]), "");
     assert!(p.exists(".junie/skills/one"), "git rm --cached keeps the working tree");
 }
 

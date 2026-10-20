@@ -136,7 +136,7 @@ pub fn parse(text: &str) -> Result<Lock> {
     }
     let mut packages: Vec<Package> = Vec::new();
     if let Some(arr) = doc.get("package").and_then(Item::as_array_of_tables) {
-        for t in arr.iter() {
+        for t in arr {
             let p = package(t)?;
             if packages.iter().any(|x| x.name == p.name) {
                 return Err(bad(format!("invalid lock: package {} appears twice", p.name)));
@@ -158,12 +158,12 @@ fn package(t: &dyn TableLike) -> Result<Package> {
     let released = match t.get("released") {
         None => None,
         Some(i) => {
-            let raw = i.as_datetime().map(|d| d.to_string()).or_else(|| i.as_str().map(String::from));
+            let raw = i.as_datetime().map(ToString::to_string).or_else(|| i.as_str().map(String::from));
             Some(raw.and_then(|r| r.parse().ok()).ok_or_else(|| bad(format!("{name}: invalid released")))?)
         }
     };
     let mut skills = Vec::new();
-    for v in t.get("skills").and_then(Item::as_array).ok_or_else(|| bad(format!("{name}: missing skills")))?.iter() {
+    for v in t.get("skills").and_then(Item::as_array).ok_or_else(|| bad(format!("{name}: missing skills")))? {
         let st = v.as_inline_table().ok_or_else(|| bad(format!("{name}: invalid skills entry")))?;
         let skill = LockedSkill {
             name: s(st, "name").map_err(ctx)?,
@@ -256,7 +256,7 @@ mod tests {
                 selected: last.then(|| vec!["agents-md".into(), "orig".into()]),
                 requires: BTreeMap::new(),
                 skills: vec![
-                    LockedSkill { name: "agents-md".into(), from: None, path: "".into(), tree_sha256: "cd".repeat(32) },
+                    LockedSkill { name: "agents-md".into(), from: None, path: String::new(), tree_sha256: "cd".repeat(32) },
                     LockedSkill { name: "two".into(), from: Some("orig".into()), path: "skills/two".into(), tree_sha256: "ef".repeat(32) },
                 ],
             });

@@ -1,6 +1,8 @@
 //! GitHub repositories as a skill source: semver tags as versions, or a branch, tag or commit
 //! pinned to its sha. Skills are found by their `SKILL.md`, see `discover`.
 
+use std::sync::PoisonError;
+
 use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit};
 use serde_json::Value;
 
@@ -79,11 +81,11 @@ fn candidate(name: &str, version: String, parsed: Version, sha: &str, time: Opti
 /// `add` asks before resolving, and the anonymous API allows 60 requests an hour.
 pub fn tags(http: &Http, name: &str) -> Result<Vec<Candidate>> {
     static SEEN: std::sync::Mutex<Vec<(String, Vec<Candidate>)>> = std::sync::Mutex::new(Vec::new());
-    if let Some((_, c)) = SEEN.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(n, _)| n == name) {
+    if let Some((_, c)) = SEEN.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(n, _)| n == name) {
         return Ok(c.clone());
     }
     let out = read_tags(http, name)?;
-    SEEN.lock().unwrap_or_else(|e| e.into_inner()).push((name.to_string(), out.clone()));
+    SEEN.lock().unwrap_or_else(PoisonError::into_inner).push((name.to_string(), out.clone()));
     Ok(out)
 }
 
@@ -246,7 +248,7 @@ pub fn newest(http: &Http, req: &SkillReq) -> Result<(Option<String>, Option<Str
 pub fn discover(entries: &[FileEntry]) -> Vec<String> {
     let mut dirs: Vec<&str> =
         entries.iter().filter_map(|e| if e.path == SKILL_MD { Some("") } else { e.path.strip_suffix(&format!("/{SKILL_MD}")) }).collect();
-    dirs.sort();
+    dirs.sort_unstable();
     let mut out: Vec<&str> = Vec::new();
     for d in dirs {
         if !out.iter().any(|o| o.is_empty() || d.starts_with(&format!("{o}/"))) {

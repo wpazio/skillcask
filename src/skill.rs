@@ -231,6 +231,7 @@ fn scan(dir: &Path, prefix: &str, publish_root: Option<&Path>, out: &mut Vec<Fil
     for entry in std::fs::read_dir(dir).ctx(dir.display())? {
         let entry = entry.ctx(dir.display())?;
         any = true;
+        #[expect(clippy::unnecessary_debug_formatting, reason = "Debug shows the non-UTF-8 bytes; the message text must not change")]
         let name = entry.file_name().into_string().map_err(|n| crate::error::Error::new(IO, format!("non-UTF-8 file name {n:?}")))?;
         if publish_root.is_some() && name.starts_with('.') {
             continue;

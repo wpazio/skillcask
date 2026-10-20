@@ -322,7 +322,7 @@ impl Ctx {
         for (p, sk) in all {
             match locked.get(sk.name.as_str()) {
                 Some((first, _)) => {
-                    out.push(conflict(p, sk, format!("skill {:?} is provided by both {} and {}", sk.name, first.name, p.name)))
+                    out.push(conflict(p, sk, format!("skill {:?} is provided by both {} and {}", sk.name, first.name, p.name)));
                 }
                 None => {
                     locked.insert(&sk.name, (p, sk));
@@ -382,19 +382,6 @@ impl Ctx {
         Ok(out)
     }
 
-    /// Installs `upstream` of `pkg` as `to`: rewrites its lock entry from the prepared download.
-    fn rename_locked(&self, lock: &mut Lock, prepared: &HashMap<String, Fetched>, pkg: &str, upstream: &str, to: &str) -> Result<()> {
-        let f = prepared.get(pkg).expect("newcomers are prepared");
-        let p = lock.packages.iter_mut().find(|p| p.name == pkg).expect("conflicts name locked packages");
-        let s = p.skills.iter_mut().find(|s| s.from.as_deref().unwrap_or(&s.name) == upstream).expect("conflicts name locked skills");
-        let (files, _) = f.renamed_files(f.skill_files(pkg, upstream, &s.path)?, &s.path, to)?;
-        s.tree_sha256 = skill::tree_hash(&files);
-        s.from = Some(upstream.to_string());
-        s.name = to.to_string();
-        p.skills.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(())
-    }
-
     /// Offers a rename for each conflict of a newly resolved package; returns the manifest entries
     /// that changed. Without a terminal, does nothing: `preflight` then fails with the hint.
     fn settle_conflicts(
@@ -411,7 +398,7 @@ impl Ctx {
         }
         let mut changed: BTreeMap<String, SkillReq> = BTreeMap::new();
         let mut rename = |lock: &mut Lock, pkg: &str, upstream: &str, to: String| -> Result<()> {
-            self.rename_locked(lock, prepared, pkg, upstream, &to)?;
+            rename_locked(lock, prepared, pkg, upstream, &to)?;
             let req = changed.entry(pkg.to_string()).or_insert_with(|| m.skill(pkg).cloned().expect("newcomers are in the manifest"));
             req.rename.insert(upstream.to_string(), to);
             Ok(())
@@ -592,6 +579,19 @@ impl Ctx {
         }
         Ok(())
     }
+}
+
+/// Installs `upstream` of `pkg` as `to`: rewrites its lock entry from the prepared download.
+fn rename_locked(lock: &mut Lock, prepared: &HashMap<String, Fetched>, pkg: &str, upstream: &str, to: &str) -> Result<()> {
+    let f = prepared.get(pkg).expect("newcomers are prepared");
+    let p = lock.packages.iter_mut().find(|p| p.name == pkg).expect("conflicts name locked packages");
+    let s = p.skills.iter_mut().find(|s| s.from.as_deref().unwrap_or(&s.name) == upstream).expect("conflicts name locked skills");
+    let (files, _) = f.renamed_files(f.skill_files(pkg, upstream, &s.path)?, &s.path, to)?;
+    s.tree_sha256 = skill::tree_hash(&files);
+    s.from = Some(upstream.to_string());
+    s.name = to.to_string();
+    p.skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(())
 }
 
 /// A skill that cannot be installed under its name.
@@ -1474,7 +1474,7 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
         match tree_on_disk(s, n, &[&sk.tree_sha256]) {
             None => open.push(format!("{}: not installed ({}); run `skillcask install`", s.show(&format!("{STORE}/{n}")), p.name)),
             Some(h) if h != sk.tree_sha256 => {
-                open.push(format!("{}: modified ({}); run `skillcask install` to restore", s.show(&format!("{STORE}/{n}")), p.name))
+                open.push(format!("{}: modified ({}); run `skillcask install` to restore", s.show(&format!("{STORE}/{n}")), p.name));
             }
             Some(_) => {}
         }
