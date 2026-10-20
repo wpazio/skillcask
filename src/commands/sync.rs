@@ -7,18 +7,17 @@ use crate::deps;
 use crate::error::{Error, MANIFEST, Result};
 use crate::lock::Lock;
 use crate::manifest::{self, Manifest};
+use crate::ui;
 
-use super::drift::{drift, drifted, fill_new_keys, reconcile};
 use super::fetch::Fetched;
-use super::resolve::settle_deps;
-use super::{Ctx, say};
+use super::{Ctx, drift, resolve, say};
 
 pub(crate) fn install(ctx: &Ctx, frozen: bool) -> Result<()> {
     let mut m = Manifest::load(&ctx.s.config, ctx.s.global)?;
     let mut lock = Lock::load(&ctx.s.config)?;
     let old = lock.clone();
-    let why = reconcile(&m, &deps::wanted(&m, &lock)?.reqs, &lock).why;
-    let filled = !frozen && fill_new_keys(&m, &mut lock);
+    let why = drift::reconcile(&m, &deps::wanted(&m, &lock)?.reqs, &lock).why;
+    let filled = !frozen && drift::fill_new_keys(&m, &mut lock);
     let mut prepared = HashMap::new();
     if !why.is_empty() {
         if frozen {
@@ -29,7 +28,7 @@ pub(crate) fn install(ctx: &Ctx, frozen: bool) -> Result<()> {
             .hint("run skillcask install locally and commit skills.lock"));
         }
         let mut newcomers = BTreeSet::new();
-        let report = settle_deps(ctx, &m, &mut lock, &mut prepared, &mut newcomers, &BTreeSet::new())?;
+        let report = resolve::settle_deps(ctx, &m, &mut lock, &mut prepared, &mut newcomers, &BTreeSet::new())?;
         m = settle_and_save(ctx, m, &mut lock, &old, &prepared, &newcomers)?;
         for r in report {
             say(&r);
@@ -56,7 +55,7 @@ pub(crate) fn update(ctx: &Ctx, names: &[String]) -> Result<()> {
     let mut newcomers = BTreeSet::new();
     let mut report = Vec::new();
     let skip: BTreeSet<String> =
-        drifted(&m, &old).into_iter().filter(|n| m.skill(n).is_some() && !names.contains(n) && old.get(n).is_some()).collect();
+        drift::drifted(&m, &old).into_iter().filter(|n| m.skill(n).is_some() && !names.contains(n) && old.get(n).is_some()).collect();
     // Entries not locked yet are resolved too, so the lock is complete afterwards.
     for req in w.reqs.iter().filter(|r| names.is_empty() || names.contains(&r.name) || old.get(&r.name).is_none()) {
         newcomers.insert(req.name.clone());
@@ -68,11 +67,11 @@ pub(crate) fn update(ctx: &Ctx, names: &[String]) -> Result<()> {
         }
         lock.upsert(new);
     }
-    report.extend(settle_deps(ctx, &m, &mut lock, &mut prepared, &mut newcomers, &skip)?);
+    report.extend(resolve::settle_deps(ctx, &m, &mut lock, &mut prepared, &mut newcomers, &skip)?);
     for n in &skip {
         let req = deps::wanted(&m, &lock)?.reqs.into_iter().find(|r| r.name == *n).expect("skip holds manifest entries");
-        if let Some(why) = drift(&m, &req, lock.get(n)) {
-            crate::ui::warn(format!("{n}: {why}; `skillcask install` updates its lock entry"));
+        if let Some(why) = drift::drift(&m, &req, lock.get(n)) {
+            ui::warn(format!("{n}: {why}; `skillcask install` updates its lock entry"));
         }
     }
     let m = settle_and_save(ctx, m, &mut lock, &old, &prepared, &newcomers)?;

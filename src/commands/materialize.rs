@@ -9,10 +9,11 @@ use crate::lock::{Lock, LockedSkill};
 use crate::manifest::Manifest;
 use crate::project::{self, STORE};
 use crate::skill;
+use crate::ui;
 
 use super::Ctx;
-use super::disk::{Link, hand_written, installed_ok, kept, link_plan, locked_names, managed_paths, set_modes, shadows};
-use super::fetch::{Fetched, skill_md_of};
+use super::disk::{self, Link};
+use super::fetch::{self, Fetched};
 
 impl Ctx {
     /// Makes disk match the lock: store, links, gitignore block, git index.
@@ -22,27 +23,27 @@ impl Ctx {
         project::clean_leftovers(s, &prepared.values().map(|f| f.dir.path()).collect::<Vec<_>>())?;
         let old_managed = project::block_managed(s)?;
         let old_block = project::read_block(s)?;
-        let locked = locked_names(lock)?;
+        let locked = disk::locked_names(lock)?;
         let locals = project::local_names(s, &m.local)?;
         for n in project::stale_local_links(s, &m.local, &locals)? {
             project::unlink(s, STORE, &n)?;
         }
-        let kept = kept(s, lock, old, &old_managed);
-        let hand = hand_written(s, lock, &old_managed.difference(&kept).cloned().collect(), &locals)?;
+        let kept = disk::kept(s, lock, old, &old_managed);
+        let hand = disk::hand_written(s, lock, &old_managed.difference(&kept).cloned().collect(), &locals)?;
 
         // `requires` is not covered by any hash; checked before anything is placed, it cannot make
         // a lock-only edit install a package skills.toml never asked for.
         for p in &lock.packages {
             let mut declared = BTreeMap::new();
             for sk in &p.skills {
-                let text = if installed_ok(s, sk) {
-                    skill_md_of(&project::store_dir(s, &sk.name))
+                let text = if disk::installed_ok(s, sk) {
+                    fetch::skill_md_of(&project::store_dir(s, &sk.name))
                 } else {
                     if !prepared.contains_key(&p.name) {
                         let f = self.fetch(&p.name, &p.dist, Some(&p.dist_sha256), None)?.1;
                         prepared.insert(p.name.clone(), f);
                     }
-                    skill_md_of(&prepared[&p.name].dir.path().join(&sk.path))
+                    fetch::skill_md_of(&prepared[&p.name].dir.path().join(&sk.path))
                 };
                 deps::collect(&mut declared, &text).map_err(|e| Error::new(MANIFEST, format!("{} {}: {e}", p.name, p.version)))?;
             }
@@ -59,7 +60,7 @@ impl Ctx {
         }
         let mut modes = project::read_modes(s);
         for p in &lock.packages {
-            let need: Vec<&LockedSkill> = p.skills.iter().filter(|sk| !installed_ok(s, sk)).collect();
+            let need: Vec<&LockedSkill> = p.skills.iter().filter(|sk| !disk::installed_ok(s, sk)).collect();
             if need.is_empty() {
                 continue;
             }
@@ -90,8 +91,8 @@ impl Ctx {
                     let shown = format!("{}/{}", project::store_shown(s, &sk.name), skill::SKILL_MD);
                     std::fs::write(project::store_dir(s, &sk.name).join(skill::SKILL_MD), md).ctx(shown)?;
                 }
-                set_modes(&mut modes, &sk.name, &files);
-                crate::ui::done("installed", format!("{} ({} {})", sk.name, p.name, p.version));
+                disk::set_modes(&mut modes, &sk.name, &files);
+                ui::done("installed", format!("{} ({} {})", sk.name, p.name, p.version));
             }
         }
 
@@ -99,9 +100,9 @@ impl Ctx {
             for t in &m.targets {
                 project::unlink(s, t, n)?;
             }
-            set_modes(&mut modes, n, &[]);
+            disk::set_modes(&mut modes, n, &[]);
             if kept.contains(n) {
-                crate::ui::warn(format!("kept {}: modified or not installed by skillcask", project::store_shown(s, n)));
+                ui::warn(format!("kept {}: modified or not installed by skillcask", project::store_shown(s, n)));
                 continue;
             }
             let dir = project::store_dir(s, n);
@@ -110,11 +111,11 @@ impl Ctx {
             } else if dir.is_dir() {
                 std::fs::remove_dir_all(dir).ctx(project::store_shown(s, n))?;
             }
-            crate::ui::done("removed", n);
+            ui::done("removed", n);
         }
         project::write_modes(s, &modes)?;
 
-        let plan = link_plan(m, &locked, &hand, &locals);
+        let plan = disk::link_plan(m, &locked, &hand, &locals);
         if !s.global {
             // In home skillcask links only locked skills; other links there are the user's.
             let names: BTreeSet<&String> = plan.iter().map(|l| &l.name).collect();
@@ -128,9 +129,9 @@ impl Ctx {
             }
         }
         let mut copies = BTreeSet::new();
-        for Link { at, source, name: n } in plan {
-            if project::link(s, at, source, &n)? && !locked.contains_key(&n) {
-                copies.insert(format!("/{at}/{n}"));
+        for Link { at, source, name } in plan {
+            if project::link(s, at, source, &name)? && !locked.contains_key(&name) {
+                copies.insert(format!("/{at}/{name}"));
             }
         }
         let managed: BTreeSet<String> = locked.keys().cloned().collect();
@@ -138,13 +139,13 @@ impl Ctx {
         // Every locked skill now matches the lock: placed now, or found intact and adopted.
         project::write_installed_here(s, &managed)?;
 
-        let tracked = project::git_tracked(s, &managed_paths(&managed, &m.targets));
+        let tracked = project::git_tracked(s, &disk::managed_paths(&managed, &m.targets));
         if !tracked.is_empty() {
             project::git_untrack(s, &tracked)?;
-            crate::ui::warn(format!("removed managed paths from the git index (files kept): {}", tracked.join(", ")));
+            ui::warn(format!("removed managed paths from the git index (files kept): {}", tracked.join(", ")));
         }
-        for w in shadows(s, m, locked.keys().chain(&hand).chain(&locals)) {
-            crate::ui::warn(w);
+        for w in disk::shadows(s, m, locked.keys().chain(&hand).chain(&locals)) {
+            ui::warn(w);
         }
         Ok(())
     }

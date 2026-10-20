@@ -15,8 +15,8 @@ use crate::ui;
 use crate::version::Constraint;
 
 use super::Ctx;
-use super::disk::{Link, hand_written, link_plan, locked_names, managed_paths, not_ours, shadows, tree_on_disk};
-use super::drift::drift;
+use super::disk::{self, Link};
+use super::drift;
 
 pub(crate) fn outdated(ctx: &Ctx) -> Result<()> {
     let m = Manifest::load(&ctx.s.config, ctx.s.global)?;
@@ -72,13 +72,13 @@ pub(crate) fn status(ctx: &Ctx) -> Result<()> {
             None => req.name.clone(),
         };
         let p = lock.get(&req.name);
-        if let Some(why) = drift(&m, req, p) {
+        if let Some(why) = drift::drift(&m, req, p) {
             row(&mut rows, &label, p.map_or("-", |p| &p.version), "-", &why);
             continue;
         }
         let Some(p) = p else { continue };
         for sk in &p.skills {
-            let state = match tree_on_disk(&ctx.s, &sk.name, &[&sk.tree_sha256]) {
+            let state = match disk::tree_on_disk(&ctx.s, &sk.name, &[&sk.tree_sha256]) {
                 None => "not installed",
                 Some(h) if h != sk.tree_sha256 => "modified",
                 Some(_) => "ok",
@@ -97,7 +97,7 @@ pub(crate) fn status(ctx: &Ctx) -> Result<()> {
         row(&mut rows, &p.name, &p.version, "-", "not in skills.toml");
     }
     let locals = project::local_names(&ctx.s, &m.local)?;
-    for h in hand_written(&ctx.s, &lock, &project::block_managed(&ctx.s)?, &locals)? {
+    for h in disk::hand_written(&ctx.s, &lock, &project::block_managed(&ctx.s)?, &locals)? {
         row(&mut rows, "-", "-", &h, "hand-written");
     }
     for l in &locals {
@@ -134,36 +134,36 @@ pub(crate) fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
     for p in m.targets.iter().map(String::as_str).chain([STORE, ".gitignore"]) {
         project::no_symlink(s, p)?;
     }
-    let locked = locked_names(&lock)?;
+    let locked = disk::locked_names(&lock)?;
     let locals = project::local_names(s, &m.local)?;
     let old_managed = project::block_managed(s)?;
-    let hand = hand_written(s, &lock, &old_managed, &locals)?;
+    let hand = disk::hand_written(s, &lock, &old_managed, &locals)?;
     let mut open = Vec::new();
     let mut fixed = Vec::new();
 
     let mut copies = BTreeSet::new();
-    for Link { at, source, name: n } in link_plan(&m, &locked, &hand, &locals) {
-        let state = project::link_state(s, at, source, &n);
-        let what = format!("{}: link {}", s.show(&format!("{at}/{n}")), format!("{state:?}").to_lowercase());
-        if state != LinkState::Foreign && not_ours(s, &m, at, &n, &state, &old_managed) {
-            open.push(format!("{} exists and was not created by skillcask; move it away", s.show(&format!("{at}/{n}"))));
+    for Link { at, source, name } in disk::link_plan(&m, &locked, &hand, &locals) {
+        let state = project::link_state(s, at, source, &name);
+        let what = format!("{}: link {}", s.show(&format!("{at}/{name}")), format!("{state:?}").to_lowercase());
+        if state != LinkState::Foreign && disk::not_ours(s, &m, at, &name, &state, &old_managed) {
+            open.push(format!("{} exists and was not created by skillcask; move it away", s.show(&format!("{at}/{name}"))));
         } else if state != LinkState::Ok {
-            if fix && s.root.join(source).join(&n).is_dir() && state != LinkState::Foreign {
-                project::link(s, at, source, &n)?;
+            if fix && s.root.join(source).join(&name).is_dir() && state != LinkState::Foreign {
+                project::link(s, at, source, &name)?;
                 fixed.push(what);
             } else {
                 open.push(what);
             }
         }
-        let p = s.root.join(at).join(&n);
+        let p = s.root.join(at).join(&name);
         let is_copy = p.symlink_metadata().is_ok_and(|m| m.is_dir()) && p.join(project::COPY_MARKER).is_file();
-        if !locked.contains_key(&n) && project::link_state(s, at, source, &n) == LinkState::Ok && is_copy {
-            copies.insert(format!("/{at}/{n}"));
+        if !locked.contains_key(&name) && project::link_state(s, at, source, &name) == LinkState::Ok && is_copy {
+            copies.insert(format!("/{at}/{name}"));
         }
     }
 
     let managed: BTreeSet<String> = locked.keys().cloned().collect();
-    let tracked = project::git_tracked(s, &managed_paths(&managed, &m.targets));
+    let tracked = project::git_tracked(s, &disk::managed_paths(&managed, &m.targets));
     if !tracked.is_empty() {
         let what = format!("managed paths committed to git: {}", tracked.join(", "));
         if fix {
@@ -187,7 +187,7 @@ pub(crate) fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
     }
 
     for (n, (p, sk)) in &locked {
-        match tree_on_disk(s, n, &[&sk.tree_sha256]) {
+        match disk::tree_on_disk(s, n, &[&sk.tree_sha256]) {
             None => open.push(format!("{}: not installed ({}); run `skillcask install`", project::store_shown(s, n), p.name)),
             Some(h) if h != sk.tree_sha256 => {
                 open.push(format!("{}: modified ({}); run `skillcask install` to restore", project::store_shown(s, n), p.name));
@@ -196,7 +196,7 @@ pub(crate) fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
         }
     }
 
-    let warnings = shadows(s, &m, locked.keys().chain(&hand).chain(&locals));
+    let warnings = disk::shadows(s, &m, locked.keys().chain(&hand).chain(&locals));
     // An agent gets the same items with a word instead of a symbol and no blank lines.
     let section = |items: &[String], mark: &str, word: &str, c: ui::Color| {
         for i in items {

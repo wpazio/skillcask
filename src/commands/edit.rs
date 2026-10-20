@@ -12,11 +12,10 @@ use crate::lock::Lock;
 use crate::manifest::{self, GitHub, Manifest, Repository, SkillReq};
 use crate::registry::{self, Candidate, Registry};
 use crate::skill;
+use crate::ui;
 use crate::version::{self, Constraint};
 
-use super::drift::drifted;
-use super::resolve::{find, required_by, settle_deps};
-use super::{Ctx, say};
+use super::{Ctx, drift, resolve, say};
 
 /// The constraint `add` writes when none is given.
 fn default_constraint(c: &Candidate, allow_ranges: bool) -> String {
@@ -39,7 +38,7 @@ pub(crate) fn init(ctx: &Ctx) -> Result<()> {
     }
     std::fs::create_dir_all(&ctx.s.config).ctx(ctx.s.config.display())?;
     std::fs::write(&path, manifest::template(ctx.s.global)).ctx(&shown)?;
-    crate::ui::done("created", &shown);
+    ui::done("created", &shown);
     Ok(())
 }
 
@@ -79,7 +78,7 @@ pub(crate) fn add(ctx: &Ctx, spec: &str, repository: Option<String>) -> Result<(
 
     let lock = Lock::load(&ctx.s.config)?;
     let probe = SkillReq { name: name.clone(), repository: repository.clone(), ..Default::default() };
-    let (repo, cands) = find(&Registry::new(ctx.http()?), &m, &probe, lock.get(&name))?;
+    let (repo, cands) = resolve::find(&Registry::new(ctx.http()?), &m, &probe, lock.get(&name))?;
     let c = registry::select(&cands, &name, constraint.as_deref().unwrap_or("*"), m.min_release_age(&repo), Timestamp::now())?;
     let constraint = constraint.unwrap_or_else(|| default_constraint(&c, m.policy.allow_ranges));
     let (skills, rename) = existing.map(|e| (e.skills, e.rename)).unwrap_or_default();
@@ -170,17 +169,17 @@ fn finish_add(ctx: &Ctx, m: &Manifest, req: &SkillReq, repo: &Repository, c: &Ca
     let mut view = m.clone();
     view.skills.retain(|r| r.name != req.name);
     view.skills.push(req.clone());
-    let mut skip = drifted(m, &old);
+    let mut skip = drift::drifted(m, &old);
     skip.remove(&req.name);
     let mut newcomers = BTreeSet::from([req.name.clone()]);
-    let report = settle_deps(ctx, &view, &mut lock, &mut prepared, &mut newcomers, &skip)?;
+    let report = resolve::settle_deps(ctx, &view, &mut lock, &mut prepared, &mut newcomers, &skip)?;
     let changed = ctx.settle_conflicts(&view, &mut lock, &old, &prepared, &newcomers, true)?;
     let req = &changed.into_iter().find(|r| r.name == req.name).unwrap_or_else(|| req.clone());
     ctx.preflight(&view, &lock, &old)?;
 
     manifest::write_skill(&ctx.s.config, ctx.s.global, req)?;
     lock.save(&ctx.s.config)?;
-    crate::ui::done("added", format!("{} = {:?} ({})", req.name, req.constraint, c.version));
+    ui::done("added", format!("{} = {:?} ({})", req.name, req.constraint, c.version));
     for r in report {
         say(&r);
     }
@@ -197,18 +196,18 @@ pub(crate) fn remove(ctx: &Ctx, names: &[String]) -> Result<()> {
             bail!(MANIFEST, "{n} is not in {} or {}", manifest::FILE, crate::lock::FILE);
         }
         if m.skill(n).is_none() && w.by.contains_key(n) {
-            bail!(MANIFEST, "{n} is a dependency; remove what requires it{}", required_by(&w, n));
+            bail!(MANIFEST, "{n} is a dependency; remove what requires it{}", resolve::required_by(&w, n));
         }
     }
     let mut view = m.clone();
     view.skills.retain(|r| !names.contains(&r.name));
     let mut prepared = HashMap::new();
-    let mut skip = drifted(&m, &old);
+    let mut skip = drift::drifted(&m, &old);
     skip.retain(|n| !names.contains(n));
-    settle_deps(ctx, &view, &mut lock, &mut prepared, &mut BTreeSet::new(), &skip)?;
+    resolve::settle_deps(ctx, &view, &mut lock, &mut prepared, &mut BTreeSet::new(), &skip)?;
     let still = deps::wanted(&view, &lock)?;
     for n in names.iter().filter(|n| lock.get(n).is_some()) {
-        crate::ui::done("kept", format!("{n} as a dependency{}", required_by(&still, n)));
+        ui::done("kept", format!("{n} as a dependency{}", resolve::required_by(&still, n)));
     }
     ctx.preflight(&view, &lock, &old)?;
     manifest::remove_skills(&ctx.s.config, ctx.s.global, names)?;

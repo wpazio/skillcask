@@ -13,11 +13,12 @@ use crate::lock::{Lock, LockedSkill, Package};
 use crate::manifest::{self, GitHub, Manifest, Repository, SkillReq};
 use crate::registry::{self, Candidate, Registry};
 use crate::skill;
+use crate::ui;
 use crate::version::{self, Constraint};
 
 use super::Ctx;
-use super::drift::{Reconciled, locked_repository, reconcile, source_changed};
-use super::fetch::{Fetched, skill_md_of};
+use super::drift::{self, Reconciled};
+use super::fetch::{self, Fetched};
 
 impl Ctx {
     /// `locked`: the entry's lock entry before this command, if any.
@@ -47,7 +48,7 @@ impl Ctx {
         p: Option<&Package>,
         prepared: &mut HashMap<String, Fetched>,
     ) -> Result<Option<Package>> {
-        let Some(p) = p.filter(|p| !source_changed(m, req, p)) else { return Ok(None) };
+        let Some(p) = p.filter(|p| !drift::source_changed(m, req, p)) else { return Ok(None) };
         if let Some(why) = m.refuses(&p.repository) {
             bail!(MANIFEST, "{}: {why}", p.name);
         }
@@ -74,7 +75,7 @@ impl Ctx {
                 }
             }
             None => {
-                let Some(repo) = locked_repository(m, req, Some(p)).filter(|_| fits()) else { return Ok(None) };
+                let Some(repo) = drift::locked_repository(m, req, Some(p)).filter(|_| fits()) else { return Ok(None) };
                 let found =
                     Registry::new(self.http()?).versions(repo, &req.name)?.and_then(|cs| cs.into_iter().find(|c| c.version == p.version));
                 let Some(c) = found else { return Ok(None) };
@@ -120,7 +121,7 @@ impl Ctx {
                 match name.or_else(|| skill::valid_name(base).then(|| base.to_string())) {
                     Some(n) => n,
                     None => {
-                        crate::ui::warn(format!("{}: skipping {md}: no valid skill name ([a-z0-9][a-z0-9-]*)", c.name));
+                        ui::warn(format!("{}: skipping {md}: no valid skill name ([a-z0-9][a-z0-9-]*)", c.name));
                         continue;
                     }
                 }
@@ -155,7 +156,7 @@ impl Ctx {
         let mut skills: Vec<LockedSkill> = Vec::new();
         let mut requires: BTreeMap<String, String> = BTreeMap::new();
         for (from, dir, md) in found {
-            deps::collect(&mut requires, &skill_md_of(&f.dir.path().join(&dir)))
+            deps::collect(&mut requires, &fetch::skill_md_of(&f.dir.path().join(&dir)))
                 .map_err(|e| Error::new(MANIFEST, format!("{} {}: {md}: {e}", c.name, c.version)))?;
             let to = req.rename.get(&from);
             let name = to.unwrap_or(&from).clone();
@@ -212,7 +213,7 @@ pub(super) fn settle_deps(
     let mut report = Vec::new();
     for _ in 0..MAX_ROUNDS {
         let w = deps::wanted(m, lock)?;
-        let Reconciled { needs, stale, .. } = reconcile(m, &w.reqs, lock);
+        let Reconciled { needs, stale, .. } = drift::reconcile(m, &w.reqs, lock);
         lock.packages.retain(|p| !stale.contains(&p.name) || skip.contains(&p.name));
         let needs: Vec<SkillReq> = needs.into_iter().filter(|r| !skip.contains(&r.name)).collect();
         if needs.is_empty() {
@@ -238,7 +239,7 @@ pub(super) fn settle_deps(
 pub(super) fn find(reg: &Registry, m: &Manifest, req: &SkillReq, locked: Option<&Package>) -> Result<(Repository, Vec<Candidate>)> {
     // A blocked repository fails here; searching the others could pick a namesake elsewhere.
     let blocked = |r: &Repository| m.refuses(&r.url).map(|why| Error::new(MANIFEST, format!("{}: {why}", req.name)));
-    let Some(repo) = locked_repository(m, req, locked) else {
+    let Some(repo) = drift::locked_repository(m, req, locked) else {
         if let Some(e) = req.repository.as_deref().and_then(|n| m.repository(n)).and_then(blocked) {
             return Err(e);
         }

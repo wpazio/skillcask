@@ -11,7 +11,7 @@ use crate::scope::Scope;
 use crate::skill;
 
 use super::Ctx;
-use super::disk::{Link, hand_written, kept, link_plan, locked_names, locked_skill, not_ours, shadows, tree_on_disk};
+use super::disk::{self, Link};
 use super::fetch::Fetched;
 
 impl Ctx {
@@ -35,14 +35,14 @@ impl Ctx {
         // would fail in the middle of `materialize`.
         let s = &self.s;
         let old_managed = project::block_managed(s)?;
-        let locked = locked_names(lock)?;
+        let locked = disk::locked_names(lock)?;
         let locals = project::local_names(s, &m.local)?;
-        let kept = kept(s, lock, old, &old_managed);
-        let hand = hand_written(s, lock, &old_managed.difference(&kept).cloned().collect(), &locals)?;
-        for Link { at, source, name: n } in link_plan(m, &locked, &hand, &locals) {
-            let removed = old_managed.contains(&n) && !kept.contains(&n) && !locked.contains_key(&n);
-            if !(at == STORE && removed) && not_ours(s, m, at, &n, &project::link_state(s, at, source, &n), &old_managed) {
-                bail!(MANIFEST, "{} exists and was not created by skillcask; move it away", s.show(&format!("{at}/{n}")));
+        let kept = disk::kept(s, lock, old, &old_managed);
+        let hand = disk::hand_written(s, lock, &old_managed.difference(&kept).cloned().collect(), &locals)?;
+        for Link { at, source, name } in disk::link_plan(m, &locked, &hand, &locals) {
+            let removed = old_managed.contains(&name) && !kept.contains(&name) && !locked.contains_key(&name);
+            if !(at == STORE && removed) && disk::not_ours(s, m, at, &name, &project::link_state(s, at, source, &name), &old_managed) {
+                bail!(MANIFEST, "{} exists and was not created by skillcask; move it away", s.show(&format!("{at}/{name}")));
             }
         }
         Ok(())
@@ -99,7 +99,7 @@ impl Ctx {
         }
         for (n, (p, sk)) in &locked {
             for t in &m.targets {
-                if not_ours(s, m, t, n, &project::link_state(s, t, STORE, n), &old_managed) {
+                if disk::not_ours(s, m, t, n, &project::link_state(s, t, STORE, n), &old_managed) {
                     out.push(conflict(
                         p,
                         sk,
@@ -171,12 +171,12 @@ impl Ctx {
                 .map(|(p, s)| (p.name.clone(), s.clone()))
                 .collect();
             for (p, s) in news {
-                let Some(w) = shadows(&self.s, m, [&s.name]).into_iter().next() else { continue };
+                let Some(w) = disk::shadows(&self.s, m, [&s.name]).into_iter().next() else { continue };
                 let taken = self.taken_names(m, lock)?;
                 let upstream = s.from.clone().unwrap_or(s.name.clone());
                 let mut suggestion = suggest(&p, &upstream, &taken);
                 while let Some(to) = ask(&question(&w, &p), suggestion.as_deref(), &taken)? {
-                    if let Some(why) = shadows(&self.s, m, [&to]).into_iter().next() {
+                    if let Some(why) = disk::shadows(&self.s, m, [&to]).into_iter().next() {
                         eprintln!("{why}");
                         suggestion = None;
                         continue;
@@ -296,12 +296,12 @@ enum Owned {
 fn store_conflict(s: &Scope, p: &Package, sk: &LockedSkill, old: &Lock, owned: &Owned) -> Option<(String, bool)> {
     let shown = project::store_shown(s, &sk.name);
     let mut expect = vec![sk.tree_sha256.as_str()];
-    let old_skill = locked_skill(old, &sk.name);
+    let old_skill = disk::locked_skill(old, &sk.name);
     expect.extend(old_skill.map(|(_, os)| os.tree_sha256.as_str()));
     if let Owned::Hashes(hs) = owned {
         expect.extend(hs.iter().map(String::as_str));
     }
-    let h = tree_on_disk(s, &sk.name, &expect);
+    let h = disk::tree_on_disk(s, &sk.name, &expect);
     if h.as_ref().is_some_and(|h| *h == sk.tree_sha256 || matches!(owned, Owned::Hashes(hs) if hs.contains(h))) {
         return None;
     }
