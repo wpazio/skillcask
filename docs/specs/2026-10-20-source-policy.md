@@ -58,7 +58,9 @@ Absent: every source is allowed. Each entry is one of:
 - `packagist`: `https://repo.packagist.org`;
 - `github`: the GitHub API in use (`<api>/repos/…`);
 - an `https://` URL prefix, matched on a `/` boundary (`https://api.github.com/repos/acme/`
-  allows the GitHub organisation `acme` only);
+  allows the GitHub organisation `acme` only). Both sides are compared as parsed URLs, so no
+  spelling of `..` leaves the prefix; below it a `..` behind `%2F` or `%5C` is refused too. An
+  entry that does not parse as a URL is an error;
 - in `skills.toml` only: a repository name from `[repositories]`, matching its URL. In
   `config.toml` and the environment a name would mean whatever a project calls that name, so
   only the forms above are accepted.
@@ -100,8 +102,9 @@ with its layer: `allow-sources = ["acme"] (config.toml, enforced)`.
 ## Testing
 
 - Unit: layer precedence for each layer, enforce conflict, env parsing, URL prefix boundary
-  (`https://git.example.com` does not allow `https://git.example.com.evil/`), names refused in
-  `config.toml`, Packagist ordered last, `github = false`.
+  (`https://git.example.com` does not allow `https://git.example.com.evil/`, `<prefix>/../other/`
+  or `<prefix>/..%2Fother/`), names refused in `config.toml`, Packagist ordered last,
+  `github = false`.
 - Integration: allow-sources limited to a private repository blocks a Packagist-only package
   without a request to it; a lock entry from a blocked source fails `install --frozen`; an
   enforced key in `config.toml` beats the project and the environment beats both; a dependency
