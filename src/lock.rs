@@ -365,6 +365,11 @@ mod tests {
         }
         let twice = format!("{ok}{}", &ok[ok.find("\n[[package]]").unwrap()..]);
         assert!(parse(&twice).unwrap_err().msg.contains("invalid lock: package a/b appears twice"));
+        // Only a missing lock is empty; one that exists but cannot be read is an error.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Lock::load(dir.path()).unwrap(), Lock::default());
+        std::fs::create_dir(dir.path().join(FILE)).unwrap();
+        assert!(Lock::load(dir.path()).is_err());
     }
 
     #[test]
