@@ -16,7 +16,7 @@ use super::Ctx;
 use super::disk::{hand_written, link_plan, locked_names, managed_paths, not_ours, shadows, tree_on_disk};
 use super::drift::drift;
 
-pub fn outdated(ctx: &Ctx) -> Result<()> {
+pub(crate) fn outdated(ctx: &Ctx) -> Result<()> {
     let m = Manifest::load(&ctx.s.config, ctx.s.global)?;
     let lock = Lock::load(&ctx.s.config)?;
     let reg = Registry::new(ctx.http()?);
@@ -49,7 +49,7 @@ pub fn outdated(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-pub fn status(ctx: &Ctx) -> Result<()> {
+pub(crate) fn status(ctx: &Ctx) -> Result<()> {
     let m = Manifest::load(&ctx.s.config, ctx.s.global)?;
     let lock = Lock::load(&ctx.s.config)?;
     let mut rows = vec![["package", "version", "skill", "state"].map(String::from)];
@@ -125,7 +125,7 @@ pub fn status(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-pub fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
+pub(crate) fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
     let s = &ctx.s;
     let m = Manifest::load(&s.config, s.global)?;
     let lock = Lock::load(&s.config)?;
@@ -225,7 +225,7 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn search(ctx: &Ctx, query: &str) -> Result<()> {
+pub(crate) fn search(ctx: &Ctx, query: &str) -> Result<()> {
     let m = ctx.manifest_or_default()?;
     let results = Registry::new(ctx.http()?).search(&m.allowed_repositories(), query)?;
     if results.is_empty() {

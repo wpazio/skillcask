@@ -11,7 +11,7 @@ use super::fetch::Fetched;
 use super::resolve::settle_deps;
 use super::{Ctx, say};
 
-pub fn install(ctx: &Ctx, frozen: bool) -> Result<()> {
+pub(crate) fn install(ctx: &Ctx, frozen: bool) -> Result<()> {
     let mut m = Manifest::load(&ctx.s.config, ctx.s.global)?;
     let mut lock = Lock::load(&ctx.s.config)?;
     let old = lock.clone();
@@ -40,7 +40,7 @@ pub fn install(ctx: &Ctx, frozen: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn update(ctx: &Ctx, names: &[String]) -> Result<()> {
+pub(crate) fn update(ctx: &Ctx, names: &[String]) -> Result<()> {
     let m = Manifest::load(&ctx.s.config, ctx.s.global)?;
     let mut lock = Lock::load(&ctx.s.config)?;
     let old = lock.clone();

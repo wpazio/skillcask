@@ -29,7 +29,7 @@ fn default_constraint(c: &Candidate, allow_ranges: bool) -> String {
     }
 }
 
-pub fn init(ctx: &Ctx) -> Result<()> {
+pub(crate) fn init(ctx: &Ctx) -> Result<()> {
     let path = ctx.s.config.join(manifest::FILE);
     let shown = if ctx.s.global { path.display().to_string() } else { manifest::FILE.into() };
     if path.exists() {
@@ -41,7 +41,7 @@ pub fn init(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-pub fn add(ctx: &Ctx, spec: &str, repository: Option<String>) -> Result<()> {
+pub(crate) fn add(ctx: &Ctx, spec: &str, repository: Option<String>) -> Result<()> {
     if let Some(rest) = spec.strip_prefix("github:") {
         if repository.is_some() {
             bail!(USAGE, "--repository does not apply to github: sources");
@@ -185,7 +185,7 @@ fn finish_add(ctx: &Ctx, m: &Manifest, req: &SkillReq, repo: &Repository, c: &Ca
     ctx.materialize(&Manifest::load(&ctx.s.config, ctx.s.global)?, &lock, &old, prepared)
 }
 
-pub fn remove(ctx: &Ctx, names: &[String]) -> Result<()> {
+pub(crate) fn remove(ctx: &Ctx, names: &[String]) -> Result<()> {
     let m = Manifest::load(&ctx.s.config, ctx.s.global)?;
     let mut lock = Lock::load(&ctx.s.config)?;
     let old = lock.clone();

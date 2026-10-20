@@ -17,21 +17,21 @@ use crate::manifest::{self, Manifest};
 use crate::scope::Scope;
 use crate::ui;
 
-pub use edit::{add, init, remove};
-pub use report::{doctor, outdated, search, status};
-pub use sync::{install, update};
+pub(crate) use edit::{add, init, remove};
+pub(crate) use report::{doctor, outdated, search, status};
+pub(crate) use sync::{install, update};
 
-pub struct Ctx {
-    pub s: Scope,
-    pub verbose: bool,
-    pub limits: Limits,
+pub(crate) struct Ctx {
+    s: Scope,
+    verbose: bool,
+    limits: Limits,
     /// stdin and stderr are terminals and CI is unset: conflicts may prompt for a rename.
-    pub interactive: bool,
+    interactive: bool,
     http: OnceCell<Http>,
 }
 
 impl Ctx {
-    pub fn new(s: Scope, verbose: bool, limits: Limits, interactive: bool) -> Ctx {
+    pub(crate) fn new(s: Scope, verbose: bool, limits: Limits, interactive: bool) -> Ctx {
         Ctx { s, verbose, limits, interactive, http: OnceCell::new() }
     }
 
@@ -65,7 +65,7 @@ mod fixtures {
     use crate::lock::{Dist, LockedSkill, Package};
 
     /// A lock entry at 1.0.0 whose skills keep their upstream names.
-    pub fn pkg(name: &str, constraint: &str, repo: &str, skills: &[&str]) -> Package {
+    pub(super) fn pkg(name: &str, constraint: &str, repo: &str, skills: &[&str]) -> Package {
         let skill = |s: &&str| LockedSkill { name: (*s).into(), from: None, path: (*s).into(), tree_sha256: String::new() };
         Package {
             name: name.into(),
