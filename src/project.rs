@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use crate::bail;
-use crate::error::{Error, IO, MANIFEST, Result};
+use crate::error::{Context, Error, IO, MANIFEST, Result};
 use crate::scope::Scope;
 use crate::skill::SKILL_MD;
 
@@ -54,10 +54,11 @@ pub fn store_dir(s: &Scope, name: &str) -> PathBuf {
 /// Skill directories in the store, excluding temp dirs.
 pub fn store_names(s: &Scope) -> Result<Vec<String>> {
     let mut out = Vec::new();
+    let shown = s.show(STORE);
     match std::fs::read_dir(s.root.join(STORE)) {
         Ok(rd) => {
             for e in rd {
-                let e = e?;
+                let e = e.ctx(&shown)?;
                 let name = e.file_name().to_string_lossy().into_owned();
                 if !name.starts_with('.') && e.path().join(SKILL_MD).is_file() {
                     out.push(name);
@@ -65,7 +66,7 @@ pub fn store_names(s: &Scope) -> Result<Vec<String>> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(e).ctx(shown),
     }
     out.sort();
     Ok(out)
@@ -95,6 +96,10 @@ pub fn no_symlink(s: &Scope, sub: &str) -> Result<()> {
 /// Writes through a temp file and a rename in the same dir, so an interrupted write leaves the old
 /// file or the new one. A symlinked file (dotfiles) is written at its target, keeping the link.
 pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    write_atomic_io(path, text).ctx(path.display())
+}
+
+fn write_atomic_io(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -112,29 +117,28 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
         #[cfg(not(unix))]
         Err(_) => {}
     }
-    tmp.persist(&path).map_err(|e| e.error)?;
-    Ok(())
+    tmp.persist(&path).map(drop).map_err(|e| e.error)
 }
 
 /// A sibling temp dir in the store, so the final rename stays on one filesystem.
 pub fn temp_dir(s: &Scope) -> Result<tempfile::TempDir> {
     no_symlink(s, STORE)?;
     let store = s.root.join(STORE);
-    std::fs::create_dir_all(&store)?;
+    let shown = s.show(STORE);
+    std::fs::create_dir_all(&store).ctx(&shown)?;
     let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
     if !runs.iter().any(|(p, _)| *p == store) {
         // No live run has our pid, so whatever is there is stale, and a planted symlink must not
         // make the create truncate its target.
-        let path = store.join(format!("{RUN}{}", std::process::id()));
-        match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-            _ => {}
+        let name = format!("{RUN}{}", std::process::id());
+        let f = match std::fs::remove_file(store.join(&name)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => std::fs::File::create_new(store.join(&name)).and_then(|f| f.lock().map(|()| f)),
         }
-        let f = std::fs::File::create_new(path)?;
-        f.lock()?;
+        .ctx(format!("{shown}/{name}"))?;
         runs.push((store.clone(), f));
     }
-    Ok(tempfile::Builder::new().prefix(&format!("{TMP}{}-", std::process::id())).tempdir_in(store)?)
+    tempfile::Builder::new().prefix(&format!("{TMP}{}-", std::process::id())).tempdir_in(store).ctx(shown)
 }
 
 /// Copies `src` into a fresh temp dir, then swaps it into the store by rename.
@@ -143,12 +147,13 @@ pub fn place(s: &Scope, name: &str, src: &Path) -> Result<()> {
     copy_dir(src, staged.path())?;
     let dest = store_dir(s, name);
     let old = s.root.join(STORE).join(format!("{OLD}{name}-{}", std::process::id()));
+    let (shown, old_shown) = (s.show(&format!("{STORE}/{name}")), s.show(&rel(&s.root, &old)));
     if old.symlink_metadata().is_ok() {
-        std::fs::remove_dir_all(&old)?;
+        std::fs::remove_dir_all(&old).ctx(&old_shown)?;
     }
     // symlink_metadata: a dangling link must be moved away too, and exists() follows links.
     if dest.symlink_metadata().is_ok() {
-        std::fs::rename(&dest, &old)?;
+        std::fs::rename(&dest, &old).ctx(&shown)?;
     }
     let staged = staged.keep();
     if let Err(e) = std::fs::rename(&staged, &dest) {
@@ -156,10 +161,10 @@ pub fn place(s: &Scope, name: &str, src: &Path) -> Result<()> {
             let _ = std::fs::rename(&old, &dest);
         }
         let _ = std::fs::remove_dir_all(&staged);
-        return Err(e.into());
+        return Err(e).ctx(shown);
     }
     if old.symlink_metadata().is_ok() {
-        std::fs::remove_dir_all(&old)?;
+        std::fs::remove_dir_all(&old).ctx(old_shown)?;
     }
     Ok(())
 }
@@ -192,24 +197,25 @@ pub fn clean_leftovers(s: &Scope, keep: &[&Path]) -> Result<()> {
         // Without a run lock (left by an older skillcask), only an old one is surely not in use.
         let stale = || e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age.as_secs() > 3600));
         if pid.and_then(gone).unwrap_or_else(stale) {
-            if e.file_type()?.is_dir() { std::fs::remove_dir_all(p)? } else { std::fs::remove_file(p)? }
+            let shown = s.show(&rel(&s.root, &p));
+            if e.file_type().ctx(&shown)?.is_dir() { std::fs::remove_dir_all(p).ctx(shown)? } else { std::fs::remove_file(p).ctx(shown)? }
         }
     }
     for p in runs {
-        std::fs::remove_file(p)?;
+        std::fs::remove_file(&p).ctx(s.show(&rel(&s.root, &p)))?;
     }
     Ok(())
 }
 
 pub fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for e in std::fs::read_dir(src)? {
-        let e = e?;
+    std::fs::create_dir_all(dst).ctx(dst.display())?;
+    for e in std::fs::read_dir(src).ctx(src.display())? {
+        let e = e.ctx(src.display())?;
         let to = dst.join(e.file_name());
-        if e.file_type()?.is_dir() {
+        if e.file_type().ctx(e.path().display())?.is_dir() {
             copy_dir(&e.path(), &to)?;
         } else {
-            std::fs::copy(e.path(), &to)?;
+            std::fs::copy(e.path(), &to).ctx(to.display())?;
         }
     }
     Ok(())
@@ -314,16 +320,17 @@ pub fn link(s: &Scope, at: &str, source: &str, name: &str) -> Result<bool> {
         LinkState::Wrong => unlink(s, at, name)?,
         LinkState::Missing => {}
     }
-    std::fs::create_dir_all(s.root.join(at))?;
+    std::fs::create_dir_all(s.root.join(at)).ctx(s.show(at))?;
+    let shown = s.show(&format!("{at}/{name}"));
     if !force_copy() {
         match symlink(&link_target(s, at, source, name), &path) {
             Ok(()) => return Ok(false),
-            Err(e) if !cfg!(windows) => return Err(e.into()),
+            Err(e) if !cfg!(windows) => return Err(e).ctx(shown),
             Err(_) => {}
         }
     }
     copy_dir(&s.root.join(source).join(name), &path)?;
-    std::fs::write(path.join(COPY_MARKER), "")?;
+    std::fs::write(path.join(COPY_MARKER), "").ctx(format!("{shown}/{COPY_MARKER}"))?;
     Ok(true)
 }
 
@@ -335,7 +342,7 @@ pub fn local_names(s: &Scope, local: &str) -> Result<BTreeSet<String>> {
     }
     let Ok(rd) = std::fs::read_dir(s.root.join(local)) else { return Ok(out) };
     for e in rd {
-        let e = e?;
+        let e = e.ctx(s.show(local))?;
         let name = e.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') || !e.path().join(SKILL_MD).is_file() {
             continue;
@@ -387,10 +394,11 @@ pub fn unlink(s: &Scope, at: &str, name: &str) -> Result<()> {
     if at != STORE && is_store_itself(s, at, name) {
         return Ok(());
     }
+    let shown = s.show(&format!("{at}/{name}"));
     if meta.file_type().is_symlink() {
-        std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir(&path))?;
+        std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir(&path)).ctx(shown)?;
     } else if meta.is_dir() && path.join(COPY_MARKER).is_file() {
-        std::fs::remove_dir_all(&path)?;
+        std::fs::remove_dir_all(&path).ctx(shown)?;
     }
     Ok(())
 }
@@ -427,15 +435,16 @@ pub fn write_modes(s: &Scope, modes: &BTreeSet<String>) -> Result<()> {
         return Ok(());
     }
     let path = s.root.join(STORE).join(MODES);
+    let shown = s.show(&format!("{STORE}/{MODES}"));
     if modes.is_empty() {
         if path.exists() {
-            std::fs::remove_file(path)?;
+            std::fs::remove_file(path).ctx(shown)?;
         }
         return Ok(());
     }
     let text: String = modes.iter().map(|l| format!("{l}\n")).collect();
     if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
-        std::fs::write(path, text)?;
+        std::fs::write(path, text).ctx(shown)?;
     }
     Ok(())
 }
@@ -596,9 +605,9 @@ fn write_block_file(path: &Path, shown: &str, lines: &[String]) -> Result<bool> 
         return Ok(false);
     }
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(dir).ctx(shown)?;
     }
-    std::fs::write(path, new)?;
+    std::fs::write(path, new).ctx(shown)?;
     Ok(true)
 }
 
