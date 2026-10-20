@@ -132,10 +132,20 @@ impl Manifest {
         let Some(list) = &self.policy.allow_sources else { return true };
         list.iter().any(|e| match e.as_str() {
             "packagist" => crate::policy::under(url, PACKAGIST_URL),
-            "github" => crate::policy::under(url, &format!("{}/repos/", crate::github::api())),
+            "github" => self.github_apis().iter().any(|a| crate::policy::under(url, &format!("{a}/repos/"))),
             e if e.starts_with("https://") => crate::policy::under(url, e),
             name => self.repository(name).is_some_and(|r| r.url == url),
         })
+    }
+
+    /// The APIs `"github"` in `allow-sources` stands for: the one in use, unless the list comes from
+    /// the environment or an enforced key, which a project's `github` url must not widen (D21).
+    fn github_apis(&self) -> Vec<String> {
+        if crate::policy::fixed(&self.policy.effective, "allow-sources") {
+            crate::github::trusted_apis()
+        } else {
+            vec![crate::github::api()]
+        }
     }
 
     /// Why packages from `url` are refused, or `None` when they are allowed.
@@ -145,7 +155,11 @@ impl Manifest {
         }
         let from = self.policy.effective.get("allow-sources").map_or("", |(_, f)| f);
         let shown = url::Url::parse(url).map_or_else(|_| url.to_string(), |u| crate::http::redact(&u));
-        Some(format!("source {shown} is not in policy.allow-sources ({from})"))
+        let github = self.policy.allow_sources.as_ref().is_some_and(|l| l.iter().any(|e| e == "github"))
+            && crate::policy::under(url, &format!("{}/repos/", crate::github::api()));
+        let why =
+            if github { format!("; there \"github\" covers {} only", crate::github::trusted_apis().join(", ")) } else { String::new() };
+        Some(format!("source {shown} is not in policy.allow-sources ({from}){why}"))
     }
 
     /// Repositories lookups may contact.

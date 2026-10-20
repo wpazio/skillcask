@@ -69,6 +69,7 @@ byte-identical skills to the ones committed in the lock, or a non-zero exit.
 | D18 | Policy has layers: environment (`SKILLCASK_*`), keys a user `config.toml` lists in `enforce`, the project `[policy]`, the rest of `config.toml`, built-in defaults. `allow-sources` limits sources by name, `packagist`, `github` or URL prefix, at resolution and at install from the lock. `init` lists Packagist and GitHub in `[repositories]`; Packagist is always searched last. | Organisations that may only use their private registry need one rule for every project, CI and dependency, which a project cannot loosen unless allowed. Checking the lock too means a committed lock cannot bypass it. The design is in `docs/specs/2026-10-20-source-policy.md`. |
 | D19 | Output has two modes: agent (`--agent`, `SKILLCASK_AGENT`, or detected from `AI_AGENT` / `CLAUDECODE`) prints terse, uncoloured, tab-separated lines and only problems; person gets colour in a terminal (off with `NO_COLOR`), hints on their own line and grouped `doctor` output. | Agents pay for padding and `ok` rows in tokens, people need to see at a glance what failed and what to run next. ANSI codes need no dependency. The design is in `docs/specs/2026-10-20-cli-output.md`. |
 | D20 | A repository's `min-release-age` (D15) cannot go below a `min-release-age` set by the environment or enforced by `config.toml`; it may raise it. The higher value applies without a message; `status` shows where the policy value comes from. Otherwise D15 applies unchanged. | D15 let a project write `min-release-age = "0"` on any repository and so loosen a cooldown its organisation fixed, against D18. A floor keeps D15's use (a stricter or reviewed internal repository) and the D18 promise. |
+| D21 | `GITHUB_TOKEN`/`GH_TOKEN` go only to the hosts of the GitHub APIs the user or the CI runner names: `api.github.com`, `SKILLCASK_GITHUB_API`, GitHub Actions' `GITHUB_API_URL`. A `github` url in `skills.toml` gets a token only from `auth.json`, `COMPOSER_AUTH` or git's credential helper, which are keyed by host. `"github"` in an `allow-sources` from the environment or an enforced key means `<api>/repos/` of those APIs only. | A committed manifest chose the host the environment token was sent to, so a pull request could collect a CI job's token, and widen an enforced `"github"`. Host-keyed credentials (GitLab, GHE in `auth.json`, `gh`) already cannot leave their host; GHE in GitHub Actions keeps working through `GITHUB_API_URL`. GHE set only in `skills.toml` with `GITHUB_TOKEN` on another CI needs `SKILLCASK_GITHUB_API` or a host-keyed token. |
 
 ## Project files
 
@@ -263,10 +264,12 @@ Exit codes: 0 ok; 1 manifest/lock/status problems or drift under `--frozen`; 2 a
 Sources, first match per host: `COMPOSER_AUTH` (JSON), `./auth.json`, `$COMPOSER_HOME/auth.json`
 (default `~/.composer/auth.json` or `~/.config/composer/auth.json`). Supported keys:
 `http-basic`, `bearer`, `gitlab-token`, `gitlab-oauth`, `github-oauth` (a `github.com` token is
-also used for `api.github.com`). `GITHUB_TOKEN` or `GH_TOKEN` is the last fallback for the GitHub
-API host (`SKILLCASK_GITHUB_API`, default `https://api.github.com`). Then git's credential helper
-(D17): `git credential fill` once per remaining host, never interactive (no terminal prompt, no
-askpass, `GCM_INTERACTIVE=never`), off with `SKILLCASK_GIT_CREDENTIALS=0`. The username picks the
+also used for `api.github.com`). `GITHUB_TOKEN` or `GH_TOKEN` is the last fallback for the hosts
+of the GitHub APIs the user or the runner names: `https://api.github.com`, `SKILLCASK_GITHUB_API`
+and GitHub Actions' `GITHUB_API_URL`, never a `github` url from `skills.toml` (D21); such a host
+needs `github-oauth` in `auth.json` or `skillcask auth set <host> --username oauth2`. Then git's
+credential helper (D17): `git credential fill` once per remaining host, never interactive (no
+terminal prompt, no askpass, `GCM_INTERACTIVE=never`), off with `SKILLCASK_GIT_CREDENTIALS=0`. The username picks the
 header: `PRIVATE-TOKEN` the GitLab header, `oauth2` a Bearer token, any other HTTP Basic.
 `skillcask auth set <host> [--username U]` stores a token (asked by git without echo, or read from
 a pipe) and `auth remove` deletes only that username's entry. A GitLab CI job reads the registry with

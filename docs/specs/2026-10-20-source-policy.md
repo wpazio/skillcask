@@ -59,7 +59,9 @@ silently drop a rule. CI without the file applies the project and the environmen
 Absent: every source is allowed. Each entry is one of:
 
 - `packagist`: `https://repo.packagist.org`;
-- `github`: the GitHub API in use (`<api>/repos/…`);
+- `github`: the GitHub API in use (`<api>/repos/…`). From the environment or an enforced key it
+  means `<api>/repos/` of the APIs the user or the CI runner names only (D21), so a project's
+  `github` url cannot widen it;
 - an `https://` URL prefix, matched on a `/` boundary (`https://api.github.com/repos/acme/`
   allows the GitHub organisation `acme` only). Both sides are compared as parsed URLs, so no
   spelling of `..` leaves the prefix; below it a `..` behind `%2F` or `%5C` is refused too. An
