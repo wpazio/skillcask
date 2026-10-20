@@ -291,12 +291,13 @@ mod tests {
 
     #[test]
     fn reads_requires() {
-        let t = "---\nname: mr\nrequires:\n  acme/review: ^1.0 # pinned\n\n  # comment\n  \"github:o/r/pr\": 'main'\n  github:o/x: \">=1, <2\"\ndescription: d\n---\n";
+        let t = "---\nname: mr\nrequires:\n  acme/review: ^1.0 # pinned\n\n  # comment\n  \"github:o/r/pr\": 'main'\n  github:o/x: \">=1, <2\"\n  acme/b: >=1, <2\ndescription: d\n---\n";
         let r = requires(t).unwrap();
-        assert_eq!(r.len(), 3, "{r:?}");
+        assert_eq!(r.len(), 4, "{r:?}");
         assert_eq!(r["acme/review"], "^1.0");
         assert_eq!(r["github:o/r/pr"], "main");
         assert_eq!(r["github:o/x"], ">=1, <2");
+        assert_eq!(r["acme/b"], ">=1, <2");
         assert!(requires("---\nname: a\n---\n").unwrap().is_empty());
         assert!(requires("---\nrequires:\n---\n").unwrap().is_empty());
         assert!(requires("# none").unwrap().is_empty());
@@ -328,6 +329,7 @@ mod tests {
         assert_eq!(rename_frontmatter("---\nname: one\nx: y\nname: two\n---\n", "b"), "---\nname: one\nx: y\nname: b\n---\n");
         assert_eq!(rename_frontmatter("---\nname: >\n  Multi Line\nx: y\n---\n", "b"), "---\nname: b\nx: y\n---\n");
         assert_eq!(rename_frontmatter("---\nname:\n  one\n---\n", "b"), "---\nname: b\n---\n");
+        assert_eq!(rename_frontmatter("---\nname: \"open\n\n---\n", "b"), "---\nname: b\n---\n", "an open quote runs to the closing ---");
         for t in ["---\nname : one\n---\n", "---\nname: one\nname: two\n---\n", "---\nname: |-\n  x\n---\n"] {
             assert_eq!(frontmatter(&rename_frontmatter(t, "b"))["name"], "b", "{t:?}");
         }
@@ -346,9 +348,13 @@ mod tests {
             assert_eq!(frontmatter(&r)["description"], "x name: innocent y");
         }
         let escaped = frontmatter("---\ndescription: \"a \\\" b\nname: c\"\nname: real\n---\n");
-        assert_eq!(escaped["name"], "real");
+        assert_eq!((escaped["name"].as_str(), escaped["description"].as_str()), ("real", "a \\\" b name: c"));
         let doubled = frontmatter("---\ndescription: 'it''s\nname: c'\nname: real\n---\n");
-        assert_eq!(doubled["name"], "real");
+        assert_eq!((doubled["name"].as_str(), doubled["description"].as_str()), ("real", "it''s name: c"));
+        // A quote still open at the closing `---` ends there: the other keys are read, it is not.
+        let open = frontmatter("---\nname: a\ndescription: \"open\n---\nname: body\n");
+        assert_eq!(open["name"], "a");
+        assert!(!open.contains_key("description"));
 
         let unclosed = "---\nname: a\ndescription: d\n";
         assert!(frontmatter(unclosed).is_empty());
@@ -390,7 +396,35 @@ mod tests {
             assert!(scan_dir(dir.path()).is_err());
             std::fs::remove_file(dir.path().join("l")).unwrap();
         }
+        #[cfg(not(unix))]
+        assert!(scan_dir(dir.path()).unwrap().iter().all(|e| !e.exec), "no exec bit without unix modes");
         std::fs::create_dir(dir.path().join("empty")).unwrap();
         assert!(scan_dir(dir.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_copies_a_relative_symlink_to_a_file_inside_the_skill_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("skill");
+        std::fs::create_dir_all(dir.join("d")).unwrap();
+        std::fs::write(dir.join("SKILL.md"), b"s").unwrap();
+        std::fs::write(dir.join("d/f.md"), b"f").unwrap();
+        std::fs::write(tmp.path().join("outside.md"), b"o").unwrap();
+        let link = |target: &str| {
+            let _ = std::fs::remove_file(dir.join("l.md"));
+            std::os::unix::fs::symlink(target, dir.join("l.md")).unwrap();
+        };
+        link("d/f.md");
+        let mut got = scan_publish(&dir).unwrap();
+        got.sort_by(|a, b| a.path.cmp(&b.path));
+        let f = FileEntry::new(String::new(), false, b"f").sha256;
+        // (path, has f.md's content)
+        let seen: Vec<(&str, bool)> = got.iter().map(|e| (e.path.as_str(), e.sha256 == f)).collect();
+        assert_eq!(seen, [("SKILL.md", false), ("d/f.md", true), ("l.md", true)]);
+        for bad in ["../outside.md", "d", &dir.join("d/f.md").display().to_string()] {
+            link(bad);
+            assert!(scan_publish(&dir).unwrap_err().msg.contains("inside the skill"), "{bad}");
+        }
     }
 }
