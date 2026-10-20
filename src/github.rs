@@ -68,7 +68,7 @@ fn candidate(name: &str, version: String, parsed: Version, sha: &str, time: Opti
         version,
         parsed,
         time,
-        dist: Dist { kind: "zip".into(), url: format!("{}/zipball/{sha}", repository(name).url), reference: Some(sha.to_string()) },
+        dist: Dist { url: format!("{}/zipball/{sha}", repository(name).url), reference: Some(sha.to_string()) },
         dist_shasum: None,
         // Empty: the skills are discovered in the archive.
         skill_paths: Vec::new(),

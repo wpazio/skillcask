@@ -8,12 +8,13 @@ use jiff::Timestamp;
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::error::{Context, Error, MANIFEST, Result};
+use crate::manifest::GitHub;
 
 pub const FILE: &str = "skills.lock";
 
+/// Always a zip: the lock refuses any other `type`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dist {
-    pub kind: String,
     pub url: String,
     pub reference: Option<String>,
 }
@@ -32,9 +33,9 @@ pub struct LockedSkill {
 pub struct Package {
     pub name: String,
     pub constraint: String,
-    /// GitHub only: `constraint` is a ref (true) or a version over tags (false). `None`: not
-    /// GitHub, or a lock written before the key existed.
-    pub git_ref: Option<bool>,
+    /// GitHub only: how `constraint` is read, written as `ref = true` (a ref) or `false` (a
+    /// version over tags). `None`: not GitHub, or a lock written before the key existed.
+    pub github: Option<GitHub>,
     pub version: String,
     pub repository: String,
     pub dist: Dist,
@@ -93,11 +94,11 @@ impl Lock {
         packages.sort_by(|a, b| a.name.cmp(&b.name));
         for p in &packages {
             let _ = write!(out, "\n[[package]]\nname = {}\nconstraint = {}\n", q(&p.name), q(&p.constraint));
-            if let Some(r) = p.git_ref {
-                let _ = writeln!(out, "ref = {r}");
+            if let Some(g) = p.github {
+                let _ = writeln!(out, "ref = {}", g == GitHub::Ref);
             }
             let _ = write!(out, "version = {}\nrepository = {}\n", q(&p.version), q(&p.repository));
-            let _ = write!(out, "dist = {{ type = {}, url = {}", q(&p.dist.kind), q(&p.dist.url));
+            let _ = write!(out, "dist = {{ type = \"zip\", url = {}", q(&p.dist.url));
             if let Some(r) = &p.dist.reference {
                 let _ = write!(out, ", reference = {}", q(r));
             }
@@ -207,11 +208,13 @@ fn package(t: &dyn TableLike) -> Result<Package> {
             requires.insert(k.to_string(), v.to_string());
         }
     }
-    let git_ref = t.get("ref").map(|i| i.as_bool().ok_or_else(|| bad(format!("invalid ref in {name}")))).transpose()?;
-    let dist = Dist { kind: s(dist, "type").map_err(ctx)?, url: s(dist, "url").map_err(ctx)?, reference: s(dist, "reference").ok() };
-    if dist.kind != "zip" {
-        return Err(bad(format!("invalid dist type {:?} in {name}, only \"zip\"", dist.kind)));
+    let github = t.get("ref").map(|i| i.as_bool().ok_or_else(|| bad(format!("invalid ref in {name}")))).transpose()?;
+    let github = github.map(|r| if r { GitHub::Ref } else { GitHub::Tags });
+    let (kind, url) = (s(dist, "type").map_err(ctx)?, s(dist, "url").map_err(ctx)?);
+    if kind != "zip" {
+        return Err(bad(format!("invalid dist type {kind:?} in {name}, only \"zip\"")));
     }
+    let dist = Dist { url, reference: s(dist, "reference").ok() };
     if !dist.url.starts_with("https://") {
         return Err(bad(format!("invalid dist url in {name}: only https:// is allowed")));
     }
@@ -221,7 +224,7 @@ fn package(t: &dyn TableLike) -> Result<Package> {
     }
     Ok(Package {
         constraint: s(t, "constraint").map_err(ctx)?,
-        git_ref,
+        github,
         version: s(t, "version").map_err(ctx)?,
         repository: s(t, "repository").map_err(ctx)?,
         dist,
@@ -250,10 +253,10 @@ mod tests {
             lock.upsert(Package {
                 name: name.into(),
                 constraint: "^1.0".into(),
-                git_ref: last.then_some(false),
+                github: last.then_some(GitHub::Tags),
                 version: "1.0.2".into(),
                 repository: "https://git.example.com/packages.json".into(),
-                dist: Dist { kind: "zip".into(), url: "https://x/a \"q\".zip".into(), reference: Some("9f2c1e".into()) },
+                dist: Dist { url: "https://x/a \"q\".zip".into(), reference: Some("9f2c1e".into()) },
                 dist_sha256: "ab".repeat(32),
                 released: Some("2026-10-01T09:12:00Z".parse().unwrap()),
                 selected: last.then(|| vec!["agents-md".into(), "orig".into()]),
@@ -286,7 +289,7 @@ mod tests {
         let mut lock = parse(&sample()).unwrap();
         assert_eq!(lock.render(), sample(), "a lock without the new keys renders byte-identical");
         let p = &mut lock.packages[0];
-        (p.git_ref, p.selected) = (Some(true), Some(vec!["one".into()]));
+        (p.github, p.selected) = (Some(GitHub::Ref), Some(vec!["one".into()]));
         let text = lock.render();
         assert!(text.contains("constraint = \"^1.0\"\nref = true\nversion") && text.contains("selected = [\"one\"]\nskills = ["), "{text}");
         assert_eq!(parse(&text).unwrap(), lock);
@@ -299,10 +302,10 @@ mod tests {
         assert_eq!(msg("type = \"zip\"", "type = \"tar\""), "skills.lock: invalid dist type \"tar\" in a/b, only \"zip\"");
         assert_eq!(msg("type = \"zip\", ", ""), "skills.lock: a/b: missing type");
         assert_eq!(msg("version = \"1.0.0\"", "ref = \"yes\"\nversion = \"1.0.0\""), "skills.lock: invalid ref in a/b");
-        for (line, git_ref) in [("", None), ("ref = true\n", Some(true)), ("ref = false\n", Some(false))] {
+        for (line, github) in [("", None), ("ref = true\n", Some(GitHub::Ref)), ("ref = false\n", Some(GitHub::Tags))] {
             let text = ok.replace("version = \"1.0.0\"", &format!("{line}version = \"1.0.0\""));
             let lock = parse(&text).unwrap();
-            assert_eq!(lock.packages[0].git_ref, git_ref, "{line:?}");
+            assert_eq!(lock.packages[0].github, github, "{line:?}");
             assert_eq!(lock.render(), text, "{line:?}");
         }
     }

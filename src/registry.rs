@@ -182,11 +182,7 @@ fn candidates(package: &str, versions: Vec<Map<String, Value>>, base: &Url) -> V
             name: package.to_string(),
             parsed,
             time,
-            dist: Dist {
-                kind: "zip".into(),
-                url: url.to_string(),
-                reference: s(&m, &["dist", "reference"]).or_else(|| s(&m, &["source", "reference"])),
-            },
+            dist: Dist { url: url.to_string(), reference: s(&m, &["dist", "reference"]).or_else(|| s(&m, &["source", "reference"])) },
             dist_shasum: s(&m, &["dist", "shasum"]),
             skill_paths,
             version,
