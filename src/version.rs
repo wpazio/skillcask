@@ -73,6 +73,12 @@ impl Version {
         parse_partial(s).map(|p| p.0).filter(|v| v.stability != Stability::Dev)
     }
 
+    /// `0.0.0`, the placeholder of a candidate that is a git ref, not a version: selection by
+    /// constraint never sees it, so it is never compared.
+    pub fn unversioned() -> Version {
+        Version { parts: [0; 4], stability: Stability::Stable, n: vec![0] }
+    }
+
     /// Default constraint written by `add`; `^0.0` would also take later `0.0.x` patches,
     /// which Composer treats as breaking.
     pub fn major_minor(&self) -> String {

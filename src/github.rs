@@ -224,8 +224,7 @@ pub fn resolve(http: &Http, req: &SkillReq, min_age: SignedDuration, now: Timest
                 }
                 crate::ui::note(format!("{name}: newer commits on {r:?} are within policy.min-release-age; using {}", &sha[..12]));
             }
-            let parsed = Version::parse("0.0.0").expect("valid");
-            Ok(candidate(name, sha[..12].to_string(), parsed, &sha, Some(time)))
+            Ok(candidate(name, sha[..12].to_string(), Version::unversioned(), &sha, Some(time)))
         }
         None => unreachable!("only GitHub entries are resolved here"),
     }

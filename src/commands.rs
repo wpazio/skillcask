@@ -149,7 +149,7 @@ impl Ctx {
                 Candidate {
                     name: p.name.clone(),
                     version: p.version.clone(),
-                    parsed: version::Version::parse(&p.version).or_else(|| version::Version::parse("0.0.0")).expect("valid"),
+                    parsed: version::Version::parse(&p.version).unwrap_or_else(version::Version::unversioned),
                     time: p.released,
                     dist: p.dist.clone(),
                     dist_shasum: None,
