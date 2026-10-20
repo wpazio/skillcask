@@ -318,7 +318,10 @@ GitHub allows 60 anonymous API requests per hour. `add`, `update` and `outdated`
 entry; `install` from the lock uses none, it downloads the pinned archive. Set `GITHUB_TOKEN`
 (GitHub Actions has one) or Composer's `"github-oauth": {"github.com": "<token>"}` in `auth.json`
 for a higher limit and for private repositories. `SKILLCASK_GITHUB_API` points at GitHub
-Enterprise (`https://ghe.example.com/api/v3`).
+Enterprise (`https://ghe.example.com/api/v3`). `GITHUB_TOKEN` is sent only to `api.github.com`,
+`SKILLCASK_GITHUB_API` and GitHub Actions' `GITHUB_API_URL`; for an Enterprise URL set only in
+`skills.toml`, use `skillcask auth set ghe.example.com --username oauth2` or `github-oauth` in
+`auth.json`.
 
 skills.sh itself is not queried: its API needs a Vercel token. Search on the website, then add
 what you picked.

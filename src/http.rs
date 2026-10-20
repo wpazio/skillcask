@@ -59,8 +59,10 @@ impl Auth {
             }
         }
         let token = ["GITHUB_TOKEN", "GH_TOKEN"].iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
-        if let (Some(t), Some(host)) = (token, Url::parse(&crate::github::api()).ok().as_ref().and_then(auth_key)) {
-            auth.0.push((host, Cred::Bearer(t)));
+        if let Some(t) = token {
+            for host in crate::github::trusted_apis().iter().filter_map(|a| Url::parse(a).ok().as_ref().and_then(auth_key)) {
+                auth.0.push((host, Cred::Bearer(t.clone())));
+            }
         }
         auth.1 = crate::credential::enabled();
         Ok(auth)
@@ -308,13 +310,16 @@ impl Http {
                 }
                 404 | 410 => return Ok(None),
                 403 | 429 if rate_limited(&resp) => {
-                    bail!(AUTH, "{shown}: HTTP {status}: GitHub API rate limit reached; set GITHUB_TOKEN")
+                    bail!(AUTH, "{shown}: HTTP {status}: GitHub API rate limit reached; set {}", crate::github::token_hint())
                 }
-                401 | 403 => bail!(
-                    AUTH,
-                    "{shown}: HTTP {status}; check auth.json / COMPOSER_AUTH for {} (GitHub: GITHUB_TOKEN, also for the anonymous rate limit)",
-                    cur.host_str().unwrap_or("")
-                ),
+                401 | 403 => {
+                    let github = if crate::github::on_trusted_host(&cur) {
+                        " (GitHub: GITHUB_TOKEN, also for the anonymous rate limit)"
+                    } else {
+                        ""
+                    };
+                    bail!(AUTH, "{shown}: HTTP {status}; check auth.json / COMPOSER_AUTH for {}{github}", cur.host_str().unwrap_or(""))
+                }
                 _ => bail!(NETWORK, "{shown}: HTTP {status}"),
             }
         }

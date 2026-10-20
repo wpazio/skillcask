@@ -353,6 +353,10 @@ impl Project {
             .env_remove("CLICOLOR_FORCE")
             .env_remove("SKILLCASK_HOME")
             .env_remove("XDG_CONFIG_HOME")
+            // Set by GitHub Actions and by developers; they decide which host gets a token.
+            .env_remove("GITHUB_API_URL")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_TOKEN")
             // HOME holds the only git config, so no system credential helper (Keychain) is asked.
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env_remove("GIT_CONFIG_GLOBAL")
