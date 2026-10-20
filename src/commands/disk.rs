@@ -1,3 +1,5 @@
+//! Read-only checks of the store and targets, and the link and mode plan.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bail;

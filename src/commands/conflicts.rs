@@ -1,3 +1,5 @@
+//! Name clashes, rename prompts and the preflight that runs before anything is saved.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::bail;

@@ -1,3 +1,5 @@
+//! The nine commands, the `Ctx` they share, and the pipeline split into fetch, resolve, conflicts, materialize.
+
 mod conflicts;
 mod disk;
 mod drift;

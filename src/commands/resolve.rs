@@ -1,3 +1,5 @@
+//! Pick versions and build lock entries; settle dependencies.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path};
 

@@ -1,3 +1,5 @@
+//! Make disk match the lock.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::bail;

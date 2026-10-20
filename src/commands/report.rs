@@ -1,3 +1,5 @@
+//! Read-only reports: outdated, status, doctor, search.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use jiff::Timestamp;

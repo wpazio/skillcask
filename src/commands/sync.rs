@@ -1,3 +1,5 @@
+//! Commands that re-lock from the manifest: install, update.
+
 use std::collections::{BTreeSet, HashMap};
 
 use crate::bail;

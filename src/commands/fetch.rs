@@ -1,3 +1,5 @@
+//! Download, verify and unpack one dist.
+
 use std::path::Path;
 
 use sha1::Sha1;

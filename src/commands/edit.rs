@@ -1,3 +1,5 @@
+//! Commands that edit skills.toml: init, add, remove.
+
 use std::collections::{BTreeSet, HashMap};
 
 use jiff::Timestamp;

@@ -1,3 +1,5 @@
+//! Manifest-vs-lock comparison: what drifted and why.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::deps;
