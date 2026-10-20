@@ -444,16 +444,19 @@ fn publish_then_install_round_trip() {
     assert!(text.contains("published acme/beta 2.1.0"), "{text}");
     s.serve_dir(&out);
 
+    let files = ["packages.json", "p2/acme/alpha.json", "p2/acme/beta.json", "dist/acme/gamma/0.3.0.zip"];
     let snapshot = || {
         let mut v = Vec::new();
-        for f in ["packages.json", "p2/acme/alpha.json", "p2/acme/beta.json", "dist/acme/gamma/0.3.0.zip"] {
+        for f in files {
             let m = std::fs::metadata(out.join(f)).unwrap();
             v.push((f, m.modified().unwrap(), std::fs::read(out.join(f)).unwrap()));
         }
         v
     };
+    for f in files {
+        backdate(&out.join(f));
+    }
     let first = snapshot();
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     assert!(publish(&p).contains("unchanged acme/alpha 1.0.0"));
     assert_eq!(snapshot(), first, "second publish of unchanged skills changes no file");
 
@@ -512,9 +515,8 @@ fn version_prints_commit() {
     p.ok(&["install"]);
 }
 
-/// End to end against Packagist: `cargo test -- --ignored`.
 #[test]
-#[ignore]
+#[ignore = "live Packagist: cargo test --test cli -- --ignored"]
 fn packagist_netresearch_jira() {
     let dir = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_skillcask");
@@ -558,15 +560,6 @@ fn project_skills_in_dot_skills_are_linked_and_committable() {
     p.write(".skills/one/SKILL.md", &skill_md("one"));
     let out = p.expect(&["install"], 1);
     assert!(out.contains("both a project skill") && out.contains("rename = { one = \"acme-one\" }"), "{out}");
-}
-
-fn gh_commit(sha: &str, hours: i64) -> serde_json::Value {
-    json!({ "sha": sha, "commit": { "committer": { "date": ago(hours) } } })
-}
-
-fn with_github(mut p: Project, s: &Server) -> Project {
-    p.env.push(("SKILLCASK_GITHUB_API".into(), s.base.clone()));
-    p
 }
 
 #[test]

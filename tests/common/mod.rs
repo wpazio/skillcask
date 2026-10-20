@@ -1,6 +1,6 @@
 //! Test harness: a local HTTPS server (test CA) serving a fixture Composer repository, and a
 //! wrapper that runs the skillcask binary in an isolated project directory.
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test binary uses its own subset of the harness")]
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -228,6 +228,29 @@ pub fn skill_md(name: &str) -> String {
 
 pub fn ago(hours: i64) -> String {
     (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(hours)).round(jiff::Unit::Second).unwrap().to_string()
+}
+
+/// A GitHub commit response committed `hours` ago.
+pub fn gh_commit(sha: &str, hours: i64) -> Value {
+    json!({ "sha": sha, "commit": { "committer": { "date": ago(hours) } } })
+}
+
+/// Points the GitHub API at the test server.
+pub fn with_github(mut p: Project, s: &Server) -> Project {
+    p.env.push(("SKILLCASK_GITHUB_API".into(), s.base.clone()));
+    p
+}
+
+/// Sets the mtime of a file or directory to a fixed time years in the past: a later write shows
+/// without sleeping past the file system's timestamp resolution, and a stale-age check trips.
+pub fn backdate(path: &Path) {
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    // Windows opens a directory handle only with FILE_FLAG_BACKUP_SEMANTICS, and needs write access to set times.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(o.write(true), 0x0200_0000);
+    o.open(path).unwrap().set_modified(past).unwrap();
 }
 
 pub struct Ver<'a> {

@@ -322,6 +322,16 @@ fn zip_entries(dir: &Path, mut entries: Vec<FileEntry>) -> Result<(Vec<u8>, Vec<
     Ok((w.finish()?.into_inner(), entries))
 }
 
+/// Sets a file's mtime to a fixed past time, so tests see a later write (or two trees with
+/// different mtimes) without sleeping past the file system's timestamp resolution. Files only:
+/// the directory-capable twin lives in `tests/common`, which unit tests cannot see.
+#[cfg(test)]
+pub(crate) fn backdate(path: &Path) {
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    // Windows needs write access to set times.
+    std::fs::File::options().read(true).write(cfg!(windows)).open(path).unwrap().set_modified(past).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,7 +597,8 @@ mod tests {
             d
         };
         let a = make();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        backdate(&a.path().join("SKILL.md"));
+        backdate(&a.path().join("scripts/run.sh"));
         let b = make();
         let za = zip_dir(a.path()).unwrap().0;
         assert_eq!(za, zip_dir(b.path()).unwrap().0);
