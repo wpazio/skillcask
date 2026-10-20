@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::archive::{self, Limits};
 use crate::bail;
 use crate::deps;
-use crate::error::{Context, Error, HASH, MANIFEST, NETWORK, Result};
+use crate::error::{Context, Error, HASH, MANIFEST, NETWORK, Result, USAGE};
 use crate::github;
 use crate::http::Http;
 use crate::lock::{Dist, Lock, LockedSkill, Package};
@@ -1195,7 +1195,7 @@ pub fn init(ctx: &Ctx) -> Result<()> {
 pub fn add(ctx: &Ctx, spec: &str, repository: Option<String>) -> Result<()> {
     if let Some(rest) = spec.strip_prefix("github:") {
         if repository.is_some() {
-            bail!(MANIFEST, "--repository does not apply to github: sources");
+            bail!(USAGE, "--repository does not apply to github: sources");
         }
         return add_github(ctx, rest);
     }
