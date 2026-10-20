@@ -54,8 +54,8 @@ pub fn publish(args: &PublishArgs) -> Result<()> {
     if !dist_url.starts_with("https://") || !dist_url.contains("{name}") || !dist_url.contains("{version}") {
         bail!(MANIFEST, "--dist-url must be an https:// URL containing {{name}} and {{version}}");
     }
-    std::fs::create_dir_all(&args.out)?;
-    let out = args.out.canonicalize()?;
+    std::fs::create_dir_all(&args.out).ctx(args.out.display())?;
+    let out = args.out.canonicalize().ctx(args.out.display())?;
 
     let roots = if args.paths.is_empty() { vec![PathBuf::from(".")] } else { args.paths.clone() };
     let mut dirs = Vec::new();
@@ -66,7 +66,8 @@ pub fn publish(args: &PublishArgs) -> Result<()> {
     let mut found: BTreeMap<String, Vec<Found>> = BTreeMap::new();
     let mut origin: BTreeMap<String, PathBuf> = BTreeMap::new();
     for dir in dirs {
-        let text = std::fs::read_to_string(dir.join(SKILL_MD))?;
+        let md = dir.join(SKILL_MD);
+        let text = std::fs::read_to_string(&md).ctx(md.display())?;
         let fm = frontmatter(&text);
         let (Some(name), Some(version)) = (fm.get("name"), fm.get("version")) else {
             let missing = match (fm.contains_key("name"), fm.contains_key("version")) {
@@ -349,12 +350,12 @@ fn find(dir: &Path, out: Option<&Path>, found: &mut Vec<PathBuf>) -> Result<()> 
     if dir.join(SKILL_MD).is_file() {
         found.push(dir.to_path_buf());
     }
-    let mut children: Vec<_> = std::fs::read_dir(dir)?.collect::<std::io::Result<_>>()?;
+    let mut children: Vec<_> = std::fs::read_dir(dir).and_then(Iterator::collect).ctx(dir.display())?;
     children.sort_by_key(|e| e.file_name());
     for e in children {
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if e.file_type()?.is_dir() && !name.starts_with('.') && name != "target" && name != "node_modules" {
+        if e.file_type().ctx(e.path().display())?.is_dir() && !name.starts_with('.') && name != "target" && name != "node_modules" {
             find(&e.path(), out, found)?;
         }
     }
@@ -372,10 +373,9 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<()> {
         return Ok(());
     }
     if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
+        std::fs::create_dir_all(p).ctx(p.display())?;
     }
-    std::fs::write(path, bytes)?;
-    Ok(())
+    std::fs::write(path, bytes).ctx(path.display())
 }
 
 #[cfg(test)]

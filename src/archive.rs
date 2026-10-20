@@ -8,7 +8,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, System, ZipArchive, ZipWriter};
 
 use crate::bail;
-use crate::error::{IO, Result};
+use crate::error::{Context, IO, Result};
 use crate::skill::{FileEntry, scan_dir, scan_publish};
 
 const S_IFMT: u32 = 0o170000;
@@ -158,7 +158,7 @@ pub fn extract(zip: &[u8], dest: &Path, limits: &Limits) -> Result<Extracted> {
                 continue;
             };
             let src = out[i].clone();
-            let content = std::fs::read(dest.join(&src.path))?;
+            let content = std::fs::read(dest.join(&src.path)).ctx(format!("archive: {:?}", src.path))?;
             charge(&mut written, content.len(), limits)?;
             write_new(dest, &rel, &content, src.exec)?;
             index.insert(rel.clone(), out.len());
@@ -193,13 +193,14 @@ fn charge(written: &mut u64, n: usize, limits: &Limits) -> Result<()> {
 
 fn write_new(dest: &Path, rel: &str, content: &[u8], exec: bool) -> Result<()> {
     let path = dest.join(rel);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::File::create_new(&path)
-        .and_then(|mut f| f.write_all(content))
-        .map_err(|err| crate::error::Error::new(IO, format!("archive: {rel:?}: {err}")))?;
-    set_mode(&path, exec)
+    let io = || -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::File::create_new(&path)?.write_all(content)?;
+        set_mode(&path, exec)
+    };
+    io().ctx(format!("archive: {rel:?}"))
 }
 
 /// Not a name Windows refuses or rewrites: reserved device names, a trailing dot or space,
@@ -275,14 +276,14 @@ pub fn bad_link_in<'a>(links: &'a [Link], dir: &str) -> Option<&'a Link> {
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, exec: bool) -> Result<()> {
+fn set_mode(path: &Path, exec: bool) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 }))?;
-    Ok(())
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 }))
 }
 
 #[cfg(not(unix))]
-fn set_mode(_: &Path, _: bool) -> Result<()> {
+#[expect(clippy::unnecessary_wraps, reason = "mirrors the unix signature; the modes file carries exec bits there")]
+fn set_mode(_: &Path, _: bool) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -316,7 +317,7 @@ fn zip_entries(dir: &Path, mut entries: Vec<FileEntry>) -> Result<(Vec<u8>, Vec<
             .system(System::Unix)
             .unix_permissions(if e.exec { 0o755 } else { 0o644 });
         w.start_file(e.path.as_str(), opts)?;
-        w.write_all(&std::fs::read(dir.join(&e.path))?)?;
+        w.write_all(&std::fs::read(dir.join(&e.path)).ctx(format!("{:?}", e.path))?)?;
     }
     Ok((w.finish()?.into_inner(), entries))
 }

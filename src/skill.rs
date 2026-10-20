@@ -6,7 +6,7 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::bail;
-use crate::error::{IO, Result};
+use crate::error::{Context, IO, Result};
 
 pub const SKILL_MD: &str = "SKILL.md";
 
@@ -335,26 +335,27 @@ pub fn scan_dir(dir: &Path) -> Result<Vec<FileEntry>> {
 /// and a relative symlink to a file inside the skill is a copy of that file, as at install.
 pub fn scan_publish(dir: &Path) -> Result<Vec<FileEntry>> {
     let mut out = Vec::new();
-    scan(dir, "", Some(&dir.canonicalize()?), &mut out)?;
+    scan(dir, "", Some(&dir.canonicalize().ctx(dir.display())?), &mut out)?;
     Ok(out)
 }
 
 fn scan(dir: &Path, prefix: &str, publish_root: Option<&Path>, out: &mut Vec<FileEntry>) -> Result<()> {
     let mut any = false;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    for entry in std::fs::read_dir(dir).ctx(dir.display())? {
+        let entry = entry.ctx(dir.display())?;
         any = true;
         let name = entry.file_name().into_string().map_err(|n| crate::error::Error::new(IO, format!("non-UTF-8 file name {n:?}")))?;
         if publish_root.is_some() && name.starts_with('.') {
             continue;
         }
         let rel = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
-        let meta = entry.path().symlink_metadata()?;
+        let meta = entry.path().symlink_metadata().ctx(format!("{rel:?}"))?;
         let ft = meta.file_type();
         if ft.is_dir() {
             scan(&entry.path(), &rel, publish_root, out)?;
         } else if ft.is_file() {
-            out.push(FileEntry::new(rel, is_exec(&meta), &std::fs::read(entry.path())?));
+            let bytes = std::fs::read(entry.path()).ctx(format!("{rel:?}"))?;
+            out.push(FileEntry::new(rel, is_exec(&meta), &bytes));
         } else if let Some(root) = publish_root.filter(|_| ft.is_symlink()) {
             let target = std::fs::canonicalize(entry.path())
                 .ok()
@@ -362,7 +363,9 @@ fn scan(dir: &Path, prefix: &str, publish_root: Option<&Path>, out: &mut Vec<Fil
             let Some(target) = target else {
                 bail!(IO, "{rel:?}: a symlink in a skill must be relative and point to a file inside the skill");
             };
-            out.push(FileEntry::new(rel, is_exec(&target.metadata()?), &std::fs::read(&target)?));
+            let what = format!("{rel:?}");
+            let meta = target.metadata().ctx(&what)?;
+            out.push(FileEntry::new(rel, is_exec(&meta), &std::fs::read(&target).ctx(what)?));
         } else {
             bail!(IO, "{rel:?}: symlinks and special files are not allowed in a skill");
         }
