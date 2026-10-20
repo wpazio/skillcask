@@ -20,6 +20,7 @@ use crate::version::{Constraint, Stability, Version};
 pub struct Candidate {
     pub name: String,
     pub version: String,
+    /// `Version::unversioned()` for a git ref candidate.
     pub parsed: Version,
     pub time: Option<Timestamp>,
     pub dist: Dist,
