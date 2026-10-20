@@ -124,7 +124,7 @@ impl Manifest {
             let init = if global { "skillcask --global init" } else { "skillcask init" };
             return Err(crate::error::Error::new(MANIFEST, format!("{FILE} not found")).hint(format!("run {init}")));
         }
-        layered(&std::fs::read_to_string(&path)?, global)
+        layered(&std::fs::read_to_string(&path).ctx(FILE)?, global)
     }
 
     /// Whether `url` (a repository URL as the lock records it) is an allowed source.

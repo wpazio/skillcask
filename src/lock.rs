@@ -7,7 +7,7 @@ use std::path::Path;
 use jiff::Timestamp;
 use toml_edit::{DocumentMut, Item, TableLike};
 
-use crate::error::{Error, MANIFEST, Result};
+use crate::error::{Context, Error, MANIFEST, Result};
 use crate::manifest::GitHub;
 
 pub const FILE: &str = "skills.lock";
@@ -63,7 +63,7 @@ impl Lock {
         match std::fs::read_to_string(root.join(FILE)) {
             Ok(t) => parse(&t),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Lock::default()),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e).ctx(FILE),
         }
     }
 
