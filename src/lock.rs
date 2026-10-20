@@ -153,14 +153,12 @@ pub fn parse(text: &str) -> Result<Lock> {
 }
 
 fn package(t: &dyn TableLike) -> Result<Package> {
-    let s = |t: &dyn TableLike, k: &str| -> Result<String> {
-        t.get(k).and_then(Item::as_str).map(String::from).ok_or_else(|| bad(format!("missing {k}")))
-    };
-    let name = s(t, "name")?;
+    let s = |t: &dyn TableLike, k: &str| t.get(k).and_then(Item::as_str).map(String::from).ok_or_else(|| format!("missing {k}"));
+    let name = s(t, "name").map_err(bad)?;
     if !crate::manifest::valid_package_name(&name) {
         return Err(bad(format!("invalid package name {name:?}")));
     }
-    let ctx = |e: Error| bad(format!("{name}: {}", e.msg.trim_start_matches("skills.lock: ")));
+    let ctx = |e: String| bad(format!("{name}: {e}"));
     let dist = t.get("dist").and_then(Item::as_table_like).ok_or_else(|| bad(format!("{name}: missing dist")))?;
     let released = match t.get("released") {
         None => None,
@@ -362,5 +360,14 @@ mod tests {
         }
         let twice = format!("{ok}{}", &ok[ok.find("\n[[package]]").unwrap()..]);
         assert!(parse(&twice).unwrap_err().msg.contains("invalid lock: package a/b appears twice"));
+    }
+
+    #[test]
+    fn a_missing_field_names_the_package_once() {
+        let e = parse(&sample().replace("version = \"1.0.0\"\n", "")).unwrap_err();
+        assert_eq!((e.code, e.msg.as_str()), (MANIFEST, "skills.lock: a/b: missing version"));
+        let e = parse(&sample().replace("name = \"one\", ", "")).unwrap_err();
+        assert_eq!(e.msg, "skills.lock: a/b: missing name");
+        assert_eq!(parse(&sample().replace("name = \"a/b\"\n", "")).unwrap_err().msg, "skills.lock: missing name");
     }
 }

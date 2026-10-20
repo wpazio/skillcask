@@ -25,6 +25,12 @@ impl Error {
         self.hint = Some(hint.into());
         self
     }
+
+    /// Rewrites the message; the code and the hint stay.
+    pub fn map_msg(mut self, f: impl FnOnce(String) -> String) -> Self {
+        self.msg = f(self.msg);
+        self
+    }
 }
 
 impl fmt::Display for Error {
@@ -53,15 +59,33 @@ macro_rules! bail {
     };
 }
 
+/// Prefixes the message with `what: `, keeping the code and the hint.
 pub trait Context<T> {
     fn ctx(self, what: impl fmt::Display) -> Result<T>;
 }
 
 impl<T, E: Into<Error>> Context<T> for std::result::Result<T, E> {
     fn ctx(self, what: impl fmt::Display) -> Result<T> {
-        self.map_err(|e| {
-            let e = e.into();
-            Error { msg: format!("{what}: {}", e.msg), ..e }
-        })
+        self.map_err(|e| e.into().map_msg(|m| format!("{what}: {m}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctx_prefixes_the_message_and_keeps_code_and_hint() {
+        let e = Err::<(), _>(Error::new(AUTH, "denied").hint("log in")).ctx("host").unwrap_err();
+        assert_eq!((e.code, e.msg.as_str(), e.hint.as_deref()), (AUTH, "host: denied", Some("log in")));
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let e = Err::<(), _>(io).ctx("skills.toml").unwrap_err();
+        assert_eq!((e.code, e.msg.as_str(), e.hint), (IO, "skills.toml: gone", None));
+    }
+
+    #[test]
+    fn map_msg_keeps_code_and_hint() {
+        let e = Error::new(HASH, "a").hint("h").map_msg(|m| m + "b");
+        assert_eq!((e.code, e.msg.as_str(), e.hint.as_deref()), (HASH, "ab", Some("h")));
     }
 }
