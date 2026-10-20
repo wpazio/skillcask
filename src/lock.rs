@@ -295,6 +295,21 @@ mod tests {
     }
 
     #[test]
+    fn dist_type_and_ref_are_checked_and_round_trip() {
+        let ok = sample();
+        let msg = |from: &str, to: &str| parse(&ok.replace(from, to)).unwrap_err().msg;
+        assert_eq!(msg("type = \"zip\"", "type = \"tar\""), "skills.lock: invalid dist type \"tar\" in a/b, only \"zip\"");
+        assert_eq!(msg("type = \"zip\", ", ""), "skills.lock: a/b: missing type");
+        assert_eq!(msg("version = \"1.0.0\"", "ref = \"yes\"\nversion = \"1.0.0\""), "skills.lock: invalid ref in a/b");
+        for (line, git_ref) in [("", None), ("ref = true\n", Some(true)), ("ref = false\n", Some(false))] {
+            let text = ok.replace("version = \"1.0.0\"", &format!("{line}version = \"1.0.0\""));
+            let lock = parse(&text).unwrap();
+            assert_eq!(lock.packages[0].git_ref, git_ref, "{line:?}");
+            assert_eq!(lock.render(), text, "{line:?}");
+        }
+    }
+
+    #[test]
     fn requires_switches_to_version_2() {
         let mut lock = parse(&sample()).unwrap();
         lock.packages[0].requires = BTreeMap::from([("github:o/r/pr".into(), "main".into()), ("acme/x".into(), "^1.0".into())]);
