@@ -14,11 +14,22 @@ use crate::error::{AUTH, Error, IO, NETWORK, Result};
 const MAX_REDIRECTS: usize = 5;
 const JSON_LIMIT: u64 = 50 * 1024 * 1024;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Cred {
     Basic(String, String),
     Bearer(String),
     PrivateToken(String),
+}
+
+/// The variant only: a token, or a username that is one, must not reach a panic or a log.
+impl std::fmt::Debug for Cred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Cred::Basic(..) => "Basic(…)",
+            Cred::Bearer(_) => "Bearer(…)",
+            Cred::PrivateToken(_) => "PrivateToken(…)",
+        })
+    }
 }
 
 impl Cred {
@@ -324,6 +335,17 @@ mod tests {
         assert_eq!(get("https://h.example.com/x"), None);
         assert_eq!(get("https://127.0.0.1:9/x"), None);
         assert_eq!(get("https://gl.example.com/x"), Some(Cred::PrivateToken("pt".into())));
+    }
+
+    #[test]
+    fn debug_hides_secrets() {
+        let mut a = Auth::default();
+        a.add(r#"{"http-basic":{"h.example.com":{"username":"ghp_user","password":"s3cret"}},"bearer":{"b.example.com":"tok"}}"#, "x")
+            .unwrap();
+        a.lookup(&Url::parse("https://b.example.com/x").unwrap());
+        let shown = format!("{a:?}");
+        assert!(shown.contains("h.example.com") && shown.contains("Basic(…)") && shown.contains("Bearer(…)"), "{shown}");
+        assert!(!shown.contains("ghp_user") && !shown.contains("s3cret") && !shown.contains("tok\""), "{shown}");
     }
 
     #[test]
