@@ -311,20 +311,20 @@ mod tests {
         std::fs::write(d.join(SKILL_MD), format!("---\nname: {name}\nversion: {version}\ndescription: d\n---\n{body}")).unwrap();
     }
 
-    fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)> {
-        let mut out = BTreeMap::new();
+    fn files(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
         let mut stack = vec![dir.to_path_buf()];
         while let Some(d) = stack.pop() {
             for e in std::fs::read_dir(d).unwrap() {
                 let p = e.unwrap().path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else {
-                    out.insert(p.clone(), (std::fs::read(&p).unwrap(), p.metadata().unwrap().modified().unwrap()));
-                }
+                if p.is_dir() { stack.push(p) } else { out.push(p) }
             }
         }
         out
+    }
+
+    fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)> {
+        files(dir).into_iter().map(|p| (p.clone(), (std::fs::read(&p).unwrap(), p.metadata().unwrap().modified().unwrap()))).collect()
     }
 
     #[test]
@@ -356,8 +356,10 @@ mod tests {
         let zip = std::fs::read(out.path().join("dist/acme/beta/2.1.0.zip")).unwrap();
         assert_eq!(v["dist"]["shasum"], hex::encode(Sha1::digest(&zip)));
 
+        for p in files(out.path()) {
+            crate::archive::backdate(&p);
+        }
         let before = snapshot(out.path());
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         publish(&args).unwrap();
         assert_eq!(snapshot(out.path()), before);
 
