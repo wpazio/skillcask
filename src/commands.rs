@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::archive::{self, Limits};
 use crate::bail;
 use crate::deps;
-use crate::error::{Context, Error, HASH, MANIFEST, NETWORK, Result};
+use crate::error::{Context, Error, HASH, MANIFEST, NETWORK, Result, USAGE};
 use crate::github;
 use crate::http::Http;
 use crate::lock::{Dist, Lock, LockedSkill, Package};
@@ -90,9 +90,6 @@ impl Ctx {
     }
 
     fn fetch(&self, name: &str, dist: &Dist, expected: Option<&str>, shasum: Option<&str>) -> Result<(String, Fetched)> {
-        if dist.kind != "zip" {
-            bail!(MANIFEST, "{name}: dist type {:?} is not supported, only zip", dist.kind);
-        }
         let bytes = self
             .http()?
             .get(&dist.url, self.limits.download)?
@@ -226,7 +223,7 @@ impl Ctx {
             Some(g) => {
                 let same_ref = g == GitHub::Ref && p.constraint == req.constraint;
                 // A lock without `ref` (0.1.2) kept the mode as long as the constraint is unchanged, as in `drift`.
-                let same_mode = p.git_ref.map_or(p.constraint == req.constraint, |r| r == (g == GitHub::Ref));
+                let same_mode = p.github.map_or(p.constraint == req.constraint, |l| l == g);
                 if !same_mode || !(same_ref || g == GitHub::Tags && fits()) {
                     return Ok(None);
                 }
@@ -333,7 +330,7 @@ impl Ctx {
         Ok(Package {
             name: c.name.clone(),
             constraint: req.constraint.clone(),
-            git_ref: req.github.map(|g| g == GitHub::Ref),
+            github: req.github,
             version: c.version.clone(),
             repository: repo.url.clone(),
             dist: c.dist.clone(),
@@ -754,7 +751,7 @@ fn locked_candidate(p: &Package) -> Candidate {
     Candidate {
         name: p.name.clone(),
         version: p.version.clone(),
-        parsed: version::Version::parse(&p.version).or_else(|| version::Version::parse("0.0.0")).expect("valid"),
+        parsed: version::Version::parse(&p.version).unwrap_or_else(version::Version::unversioned),
         time: p.released,
         dist: p.dist.clone(),
         dist_shasum: None,
@@ -1101,11 +1098,11 @@ fn drift(m: &Manifest, req: &SkillReq, p: Option<&Package>) -> Option<String> {
     if source_changed(m, req, p) {
         return Some("repository changed".into());
     }
-    let mode = |r: bool| if r { "ref" } else { "version" };
-    if let (Some(g), Some(r)) = (req.github, p.git_ref)
-        && r != (g == GitHub::Ref)
+    let mode = |g: GitHub| if g == GitHub::Ref { "ref" } else { "version" };
+    if let (Some(g), Some(l)) = (req.github, p.github)
+        && l != g
     {
-        return Some(format!("changed from {} to {}", mode(r), mode(!r)));
+        return Some(format!("changed from {} to {}", mode(l), mode(g)));
     }
     let upstream: BTreeSet<&String> = p.skills.iter().map(|s| s.from.as_ref().unwrap_or(&s.name)).collect();
     let selection_changed = match &req.skills {
@@ -1198,7 +1195,7 @@ pub fn init(ctx: &Ctx) -> Result<()> {
 pub fn add(ctx: &Ctx, spec: &str, repository: Option<String>) -> Result<()> {
     if let Some(rest) = spec.strip_prefix("github:") {
         if repository.is_some() {
-            bail!(MANIFEST, "--repository does not apply to github: sources");
+            bail!(USAGE, "--repository does not apply to github: sources");
         }
         return add_github(ctx, rest);
     }
@@ -1411,10 +1408,10 @@ fn fill_new_keys(m: &Manifest, lock: &mut Lock) -> bool {
             p.selected = Some(sel);
             filled = true;
         }
-        if p.git_ref.is_none()
+        if p.github.is_none()
             && let Some(g) = req.github
         {
-            p.git_ref = Some(g == GitHub::Ref);
+            p.github = Some(g);
             filled = true;
         }
     }

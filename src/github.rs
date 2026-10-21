@@ -68,7 +68,7 @@ fn candidate(name: &str, version: String, parsed: Version, sha: &str, time: Opti
         version,
         parsed,
         time,
-        dist: Dist { kind: "zip".into(), url: format!("{}/zipball/{sha}", repository(name).url), reference: Some(sha.to_string()) },
+        dist: Dist { url: format!("{}/zipball/{sha}", repository(name).url), reference: Some(sha.to_string()) },
         dist_shasum: None,
         // Empty: the skills are discovered in the archive.
         skill_paths: Vec::new(),
@@ -227,8 +227,7 @@ pub fn resolve(http: &Http, req: &SkillReq, min_age: SignedDuration, now: Timest
                 }
                 crate::ui::note(format!("{name}: newer commits on {r:?} are within policy.min-release-age; using {}", &sha[..12]));
             }
-            let parsed = Version::parse("0.0.0").expect("valid");
-            Ok(candidate(name, sha[..12].to_string(), parsed, &sha, Some(time)))
+            Ok(candidate(name, sha[..12].to_string(), Version::unversioned(), &sha, Some(time)))
         }
         None => unreachable!("only GitHub entries are resolved here"),
     }

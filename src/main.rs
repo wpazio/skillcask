@@ -27,7 +27,7 @@ use clap::{Parser, Subcommand};
 
 use crate::archive::Limits;
 use crate::commands::Ctx;
-use crate::error::{Error, MANIFEST};
+use crate::error::{Error, IO, USAGE};
 use crate::scope::Scope;
 
 const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("SKILLCASK_COMMIT"), ")");
@@ -192,7 +192,7 @@ fn run(cli: Cli) -> Result<(), Error> {
         files: cli.max_files.unwrap_or(d.files),
     };
     if cli.global && matches!(cli.cmd, Cmd::External(_) | Cmd::Publish { .. } | Cmd::Auth(_) | Cmd::Validate { .. }) {
-        return Err(Error::new(MANIFEST, "--global does not apply to this command"));
+        return Err(Error::new(USAGE, "--global does not apply to this command"));
     }
     if let Cmd::External(args) = &cli.cmd {
         return plugin(args);
@@ -234,7 +234,7 @@ fn run(cli: Cli) -> Result<(), Error> {
         Cmd::External(_) | Cmd::Auth(_) | Cmd::Validate { .. } => unreachable!("handled above"),
         Cmd::Publish { vendor, base_url, dist_url, inline, out, paths } => {
             if vendor.is_empty() {
-                return Err(Error::new(MANIFEST, "--vendor must not be empty"));
+                return Err(Error::new(USAGE, "--vendor must not be empty"));
             }
             publish::publish(&publish::PublishArgs { vendor, base_url, dist_url, inline, out, paths })
         }
@@ -250,7 +250,7 @@ fn auth(cmd: &AuthCmd) -> Result<(), Error> {
         .filter(|u| u.scheme() == "https")
         .and_then(|u| Some(u.host_str()?.to_string() + &u.port().map(|p| format!(":{p}")).unwrap_or_default()))
     else {
-        return Err(Error::new(MANIFEST, format!("invalid host {host:?}")));
+        return Err(Error::new(USAGE, format!("invalid host {host:?}")));
     };
     match cmd {
         AuthCmd::Set { .. } => {
@@ -269,14 +269,14 @@ fn plugin(args: &[OsString]) -> Result<(), Error> {
     let name = args[0].to_string_lossy();
     // A separator would make Command run a path relative to the cwd instead of searching PATH.
     if name.is_empty() || name.contains(['/', '\\']) {
-        return Err(Error::new(MANIFEST, format!("unknown command {name:?}")));
+        return Err(Error::new(USAGE, format!("unknown command {name:?}")));
     }
     let exe = format!("skillcask-{name}");
     let status = std::process::Command::new(&exe).args(&args[1..]).status().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            Error::new(MANIFEST, format!("unknown command {name:?} (no {exe} on PATH)"))
+            Error::new(USAGE, format!("unknown command {name:?} (no {exe} on PATH)"))
         } else {
-            Error::new(error::IO, format!("{exe}: {e}"))
+            Error::new(IO, format!("{exe}: {e}"))
         }
     })?;
     #[cfg(unix)]
@@ -290,11 +290,11 @@ fn main() {
     // clap exits 2 on usage errors, which here means authentication.
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         let _ = e.print();
-        std::process::exit(if e.use_stderr() { MANIFEST.into() } else { 0 });
+        std::process::exit(if e.use_stderr() { USAGE.exit() } else { 0 });
     });
     ui::init(cli.agent);
     if let Err(e) = run(cli) {
         ui::error(&e.msg, e.hint.as_deref());
-        std::process::exit(e.code.into());
+        std::process::exit(e.code.exit());
     }
 }
