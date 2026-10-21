@@ -52,12 +52,12 @@ pub fn check(key: &str, value: &str) -> std::result::Result<(Target, Option<GitH
     let req = SkillReq { name: t.package().into(), constraint: value.into(), github: mode, ..Default::default() };
     // The consumer's allow-ranges applies to its own manifest only; the lock pins the version.
     let any = Policy {
-        min_release_age: Default::default(),
+        min_release_age: jiff::SignedDuration::ZERO,
         allow_ranges: true,
         packagist: true,
         github_requires: true,
         allow_sources: None,
-        effective: Default::default(),
+        effective: BTreeMap::new(),
     };
     manifest::check_constraint(&req, &any).map_err(|e| format!("{key}: {e}"))?;
     Ok((t, mode))
@@ -81,7 +81,7 @@ pub fn collect(acc: &mut BTreeMap<String, String>, skill_md: &str) -> std::resul
 /// than `,`). A single constraint is returned as written.
 pub fn intersect(cs: &[String]) -> std::result::Result<String, String> {
     let mut cs: Vec<&str> = cs.iter().map(|c| c.trim()).collect();
-    cs.sort();
+    cs.sort_unstable();
     cs.dedup();
     if let [one] = cs[..] {
         return Ok(one.to_string());
@@ -207,6 +207,8 @@ fn merge(m: &Manifest, name: &str, base: Option<&SkillReq>, asks: &[Ask]) -> Res
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     #[test]
@@ -230,7 +232,7 @@ mod tests {
 
     #[test]
     fn intersects_constraints() {
-        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let s = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
         assert_eq!(intersect(&s(&["^1.2", "^1.0"])).unwrap(), "^1.0, ^1.2");
         assert_eq!(intersect(&s(&["^1 || ^2", "^2.1"])).unwrap(), "^1, ^2.1 || ^2, ^2.1");
         assert_eq!(intersect(&s(&["1.0 - 2.0"])).unwrap(), "1.0 - 2.0");
@@ -249,9 +251,10 @@ mod tests {
         let h = "a".repeat(64);
         let mut t = String::from("version = 2\n");
         for (name, constraint, requires) in packages {
-            t.push_str(&format!(
+            let _ = write!(
+                t,
                 "[[package]]\nname = \"{name}\"\nconstraint = \"{constraint}\"\nversion = \"1.0.0\"\nrepository = \"https://r\"\ndist = {{ type = \"zip\", url = \"https://d\" }}\ndist-sha256 = \"{h}\"\nrequires = {{ {requires} }}\nskills = []\n"
-            ));
+            );
         }
         crate::lock::parse(&t).unwrap()
     }

@@ -2,6 +2,7 @@
 //! Credential Manager or libsecret instead of a plain-text `auth.json`. Asked per host after the
 //! Composer sources; `SKILLCASK_GIT_CREDENTIALS=0` turns it off.
 
+use std::fmt::Write as _;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -41,7 +42,7 @@ fn describe(host: &str, username: Option<&str>, password: Option<&str>) -> Strin
     let mut s = format!("protocol=https\nhost={host}\n");
     for (k, v) in [("username", username), ("password", password)] {
         if let Some(v) = v {
-            s.push_str(&format!("{k}={v}\n"));
+            let _ = writeln!(s, "{k}={v}");
         }
     }
     s + "\n"

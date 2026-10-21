@@ -198,7 +198,7 @@ pub fn spec_problems(text: &str, dir_name: &str) -> Vec<String> {
     match fm.get("name") {
         None => out.push("name is required".into()),
         Some(n) if n.len() > 64 || !valid_name(n) || n.ends_with('-') || n.contains("--") => {
-            out.push(format!("name {n:?} must be 1-64 lowercase letters, digits and single hyphens, not starting or ending with a hyphen"))
+            out.push(format!("name {n:?} must be 1-64 lowercase letters, digits and single hyphens, not starting or ending with a hyphen"));
         }
         Some(n) if n != dir_name => out.push(format!("name {n:?} does not match the directory name {dir_name:?}")),
         Some(_) => {}
@@ -288,10 +288,11 @@ pub fn invisible_warnings(path: &str, bytes: &[u8]) -> Vec<String> {
 /// Package text for the terminal: control characters (except tab) and the characters `invisible`
 /// reports become `<U+XXXX>`, so they are seen instead of moving the cursor or reordering the line.
 pub fn shown(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if (c.is_control() && c != '\t') || invisible_name(c).is_some() {
-            out.push_str(&format!("<U+{:04X}>", u32::from(c)));
+            let _ = write!(out, "<U+{:04X}>", u32::from(c));
         } else {
             out.push(c);
         }
@@ -344,6 +345,7 @@ fn scan(dir: &Path, prefix: &str, publish_root: Option<&Path>, out: &mut Vec<Fil
     for entry in std::fs::read_dir(dir).ctx(dir.display())? {
         let entry = entry.ctx(dir.display())?;
         any = true;
+        #[expect(clippy::unnecessary_debug_formatting, reason = "Debug shows the non-UTF-8 bytes; the message text must not change")]
         let name = entry.file_name().into_string().map_err(|n| crate::error::Error::new(IO, format!("non-UTF-8 file name {n:?}")))?;
         if publish_root.is_some() && name.starts_with('.') {
             continue;
@@ -499,7 +501,7 @@ mod tests {
         for c in ['\u{061C}', '\u{200C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202D}', '\u{2060}', '\u{2066}', '\u{2069}'] {
             assert_eq!(found(&c.to_string()).len(), 1, "{c:?}");
         }
-        assert!(found("zażółć ‘quotes’ — dash\t\u{00A0}").is_empty());
+        assert_eq!(found("zażółć ‘quotes’ — dash\t\u{00A0}"), Vec::<(usize, u32)>::new());
 
         assert_eq!(invisible_warnings("s/SKILL.md", "x\n\u{202E}".as_bytes()), ["s/SKILL.md:2: U+202E RIGHT-TO-LEFT OVERRIDE"]);
         assert!(invisible_warnings("a.bin", b"\xe2\x80\xae\xff").is_empty(), "binary files are skipped");
@@ -512,15 +514,15 @@ mod tests {
     #[test]
     fn checks_the_agent_skills_spec() {
         let md = |fm: &str| format!("---\n{fm}---\nbody\n");
-        assert!(spec_problems(&md("name: a-1\ndescription: d\ncompatibility: git\n"), "a-1").is_empty());
-        assert!(spec_problems(&format!("\u{feff}{}", md("name: a\ndescription: d\n")), "a").is_empty());
+        assert_eq!(spec_problems(&md("name: a-1\ndescription: d\ncompatibility: git\n"), "a-1"), Vec::<String>::new());
+        assert_eq!(spec_problems(&format!("\u{feff}{}", md("name: a\ndescription: d\n")), "a"), Vec::<String>::new());
         assert_eq!(spec_problems("# none", "a"), ["SKILL.md has no frontmatter (--- ... ---)"]);
         assert_eq!(spec_problems(&md("x: y\n"), "a"), ["name is required", "description is required"]);
         for bad in ["A", "-a", "a-", "a--b", "a_b", &"a".repeat(65)] {
             let p = spec_problems(&md(&format!("name: {bad}\ndescription: d\n")), bad);
             assert!(p.len() == 1 && p[0].contains("must be 1-64"), "{bad}: {p:?}");
         }
-        assert!(spec_problems(&md(&format!("name: {}\ndescription: d\n", "a".repeat(64))), &"a".repeat(64)).is_empty());
+        assert_eq!(spec_problems(&md(&format!("name: {}\ndescription: d\n", "a".repeat(64))), &"a".repeat(64)), Vec::<String>::new());
         assert_eq!(spec_problems(&md("name: a\ndescription: d\n"), "b"), ["name \"a\" does not match the directory name \"b\""]);
         let long = md(&format!("name: a\ndescription: {}\ncompatibility: {}\n", "ł".repeat(1025), "c".repeat(501)));
         assert_eq!(

@@ -27,6 +27,7 @@ pub struct Candidate {
     pub dist_shasum: Option<String>,
     pub skill_paths: Vec<String>,
     /// Composer `abandoned`: `Some(replacement)` when set.
+    #[expect(clippy::option_option, reason = "None is not abandoned, Some(None) abandoned without a replacement, as Composer writes it")]
     pub abandoned: Option<Option<String>>,
     pub description: Option<String>,
     pub license: Vec<String>,
@@ -383,7 +384,7 @@ pub fn warn_abandoned(cands: &[Candidate]) {
     match &c.abandoned {
         // The replacement is registry text: printed only when it cannot carry escapes or lines.
         Some(Some(r)) if crate::manifest::valid_package_name(r) => {
-            crate::ui::warn(crate::skill::shown(&format!("{} is abandoned; use {r} instead", c.name)))
+            crate::ui::warn(crate::skill::shown(&format!("{} is abandoned; use {r} instead", c.name)));
         }
         Some(_) => crate::ui::warn(crate::skill::shown(&format!("{} is abandoned", c.name))),
         None => {}

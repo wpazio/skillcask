@@ -44,6 +44,7 @@ struct Cli {
     global: bool,
     /// Terse output for coding agents: no colour, no padding, problems only. Also SKILLCASK_AGENT=1;
     /// detected from AI_AGENT or CLAUDECODE unless SKILLCASK_AGENT=0.
+    #[expect(clippy::doc_markdown, reason = "clap prints this doc comment as help text; backticks would show")]
     #[arg(long, global = true)]
     agent: bool,
     /// Maximum download size, e.g. 50M.

@@ -542,7 +542,7 @@ mod tests {
         )
         .unwrap();
         let mut paths: Vec<_> = e.iter().map(|e| (e.path.as_str(), e.exec)).collect();
-        paths.sort();
+        paths.sort_unstable();
         assert_eq!(paths, [("SKILL.md", false), ("bin/x", true)]);
         let e = try_extract(&[Item::File("top/a", 0o644, b"1"), Item::File("b", 0o644, b"2")], Limits::default()).unwrap();
         assert!(e.iter().any(|e| e.path == "top/a"));

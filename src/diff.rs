@@ -14,6 +14,11 @@ const MAX_LINES: usize = 10_000;
 const MAX_BYTES: usize = 1 << 20;
 
 /// Shortest edit script from `a` to `b` (Myers 1986), or `None` past `MAX_EDITS`.
+#[expect(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "Myers indexes v by a signed diagonal k; sides are capped at MAX_LINES"
+)]
 fn myers(a: &[&str], b: &[&str]) -> Option<Vec<Op>> {
     let (n, m) = (a.len() as isize, b.len() as isize);
     let off = (n + m).min(MAX_EDITS as isize) + 1;
@@ -39,6 +44,11 @@ fn myers(a: &[&str], b: &[&str]) -> Option<Vec<Op>> {
     None
 }
 
+#[expect(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "Myers indexes v by a signed diagonal k; sides are capped at MAX_LINES"
+)]
 fn backtrack(trace: &[Vec<isize>], n: isize, m: isize) -> Vec<Op> {
     let (mut x, mut y) = (n, m);
     let mut ops = Vec::new();
@@ -148,7 +158,7 @@ mod tests {
 
     #[test]
     fn hunks_with_context() {
-        assert!(unified("a\nb\n", "a\nb\n", 3).is_empty());
+        assert_eq!(unified("a\nb\n", "a\nb\n", 3), Vec::<String>::new());
         assert_eq!(unified("a\nb\nc\n", "a\nB\nc\n", 3), ["@@ -1,3 +1,3 @@", " a", "-b", "+B", " c"]);
         assert_eq!(unified("", "x\n", 3), ["@@ -0,0 +1,1 @@", "+x"]);
         assert_eq!(unified("x\n", "", 3), ["@@ -1,1 +0,0 @@", "-x"]);

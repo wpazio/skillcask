@@ -351,7 +351,7 @@ fn find(dir: &Path, out: Option<&Path>, found: &mut Vec<PathBuf>) -> Result<()> 
         found.push(dir.to_path_buf());
     }
     let mut children: Vec<_> = std::fs::read_dir(dir).and_then(Iterator::collect).ctx(dir.display())?;
-    children.sort_by_key(|e| e.file_name());
+    children.sort_by_key(std::fs::DirEntry::file_name);
     for e in children {
         let name = e.file_name();
         let name = name.to_string_lossy();
@@ -593,7 +593,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let out = tempfile::tempdir().unwrap();
         let write = |req: &str| {
-            std::fs::write(src.path().join(SKILL_MD), format!("---\nname: alpha\nversion: 1.0.0\nrequires:\n  {req}\n---\n")).unwrap()
+            std::fs::write(src.path().join(SKILL_MD), format!("---\nname: alpha\nversion: 1.0.0\nrequires:\n  {req}\n---\n")).unwrap();
         };
         write("acme/beta: ^1.0");
         publish(&args(src.path(), out.path())).unwrap();

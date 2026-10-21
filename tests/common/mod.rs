@@ -148,7 +148,7 @@ fn handle(s: &mut (impl Read + Write), st: &Mutex<State>) -> std::io::Result<()>
         let path_only = path.split('?').next().unwrap_or("");
         if st.auth.is_some() && st.auth != auth {
             (401, Vec::new(), Vec::new())
-        } else if let Some(r) = st.queued.get_mut(path_only).and_then(|q| q.pop_front()) {
+        } else if let Some(r) = st.queued.get_mut(path_only).and_then(std::collections::VecDeque::pop_front) {
             r
         } else if let Some(r) = st.responses.get(&path).or_else(|| st.responses.get(path_only)) {
             r.clone()
