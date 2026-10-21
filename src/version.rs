@@ -268,6 +268,7 @@ fn tokens(group: &str) -> Vec<String> {
 }
 
 /// Pushes the comparisons for one atom; returns the stability it names explicitly, if any.
+#[expect(clippy::option_option, reason = "None is a parse failure, Some(None) an atom without an explicit stability")]
 fn atom(s: &str, all: &mut Vec<Cmp>) -> Option<Option<Stability>> {
     if s.is_empty() || s == "*" || s.eq_ignore_ascii_case("x") {
         return Some(None);

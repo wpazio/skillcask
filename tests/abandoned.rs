@@ -4,7 +4,7 @@ mod common;
 use common::*;
 use serde_json::json;
 
-fn abandoned(s: &Server, name: &str, value: serde_json::Value) {
+fn abandoned(s: &Server, name: &str, value: &serde_json::Value) {
     s.simple(name, "1.0.0", "old");
     let v = json!({ "name": name, "version": "1.0.0", "version_normalized": "1.0.0.0", "type": "ai-agent-skill", "time": ago(240),
         "dist": { "type": "zip", "url": s.url(&format!("/dist/{name}/1.0.0.zip")) }, "abandoned": value });
@@ -14,7 +14,7 @@ fn abandoned(s: &Server, name: &str, value: serde_json::Value) {
 #[test]
 fn add_update_and_outdated_warn_about_an_abandoned_package() {
     let s = Server::start();
-    abandoned(&s, "acme/old", json!("acme/new\u{1b}]0;x"));
+    abandoned(&s, "acme/old", &json!("acme/new\u{1b}]0;x"));
     let p = Project::new(&s);
     p.manifest(&s, "");
     for args in [&["add", "acme/old"][..], &["update"], &["outdated"]] {
@@ -31,7 +31,7 @@ fn add_update_and_outdated_warn_about_an_abandoned_package() {
 #[test]
 fn abandoned_without_replacement() {
     let s = Server::start();
-    abandoned(&s, "acme/old", json!(true));
+    abandoned(&s, "acme/old", &json!(true));
     let p = Project::new(&s);
     p.manifest(&s, "");
     let out = p.ok(&["add", "acme/old"]);

@@ -264,7 +264,7 @@ fn untracking_works_with_staged_changes() {
     git(p.path(), &["add", "-f", ".agents/skills/one/SKILL.md"]);
     let out = p.ok(&["install"]);
     assert!(out.contains("removed managed paths from the git index"), "{out}");
-    assert!(git(p.path(), &["ls-files"]).is_empty());
+    assert_eq!(git(p.path(), &["ls-files"]), "");
 }
 
 #[test]

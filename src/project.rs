@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::PoisonError;
 
 use crate::bail;
 use crate::error::{Context, Error, IO, MANIFEST, Result};
@@ -112,7 +113,7 @@ fn write_atomic_io(path: &Path, text: &str) -> std::io::Result<()> {
         #[cfg(unix)]
         Err(_) => {
             use std::os::unix::fs::PermissionsExt;
-            tmp.as_file().set_permissions(std::fs::Permissions::from_mode(0o644))?
+            tmp.as_file().set_permissions(std::fs::Permissions::from_mode(0o644))?;
         }
         #[cfg(not(unix))]
         Err(_) => {}
@@ -126,7 +127,7 @@ pub fn temp_dir(s: &Scope) -> Result<tempfile::TempDir> {
     let store = s.root.join(STORE);
     let shown = s.show(STORE);
     std::fs::create_dir_all(&store).ctx(&shown)?;
-    let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut runs = RUNS.lock().unwrap_or_else(PoisonError::into_inner);
     if !runs.iter().any(|(p, _)| *p == store) {
         // No live run has our pid, so whatever is there is stale, and a planted symlink must not
         // make the create truncate its target.
@@ -611,7 +612,7 @@ fn write_block_file(path: &Path, shown: &str, lines: &[String]) -> Result<bool> 
     Ok(true)
 }
 
-/// Git for the project's own repository: inherited GIT_DIR and the like would point it at another,
+/// Git for the project's own repository: inherited `GIT_DIR` and the like would point it at another,
 /// and paths are literal, not globs.
 fn git(s: &Scope) -> Command {
     let mut c = Command::new("git");
@@ -794,7 +795,8 @@ mod tests {
         std::fs::write(ignore_file(&s), format!("{BEGIN}\n/.agents/skills/a/\n")).unwrap();
         let e = block_managed(&s).unwrap_err().to_string();
         assert!(e.contains("~/.agents/skills/.skillcask-installed: the skillcask block has no end line"), "{e}");
-        assert!(git_tracked(&s, &["x".into()]).is_empty());
+        let tracked = git_tracked(&s, &["x".into()]);
+        assert!(tracked.is_empty(), "{tracked:?}");
         std::fs::create_dir_all(home.path().join("p")).unwrap();
         std::fs::write(home.path().join("p/SKILL.md"), "").unwrap();
         assert!(local_names(&s, "").unwrap().is_empty(), "the global scope has no project skills");

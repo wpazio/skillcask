@@ -360,7 +360,7 @@ pub fn parse_with(text: &str, global: bool, outer: &crate::policy::Outer) -> Res
         Some(i) => i.as_str().ok_or_else(|| bad("agents.local must be a path"))?.trim_end_matches('/').to_string(),
     };
     let targets = match agents.and_then(|a| a.get("targets")) {
-        None => DEFAULT_TARGETS.iter().map(|s| s.to_string()).collect(),
+        None => DEFAULT_TARGETS.iter().map(ToString::to_string).collect(),
         Some(i) => string_array(i).ok_or_else(|| bad("agents.targets must be a list of paths"))?,
     };
     for t in targets.iter().chain([&local]) {
@@ -434,6 +434,8 @@ fn age(i: &Item, what: &str) -> Result<SignedDuration> {
 
 /// `"3d"`, `"12h"`, `"30m"`, `"1w"`, `"90s"`, `"0"`.
 pub fn parse_age(s: &str) -> Result<SignedDuration> {
+    // Past this the cutoff arithmetic in resolution could overflow and disable the cooldown.
+    const MAX: i64 = 36525 * 86400;
     let s = s.trim();
     if s == "0" {
         return Ok(SignedDuration::ZERO);
@@ -448,8 +450,6 @@ pub fn parse_age(s: &str) -> Result<SignedDuration> {
         "w" => 7 * 86400,
         _ => return Err(bad(format!("invalid duration {s:?}, use s, m, h, d or w"))),
     };
-    // Past this the cutoff arithmetic in resolution could overflow and disable the cooldown.
-    const MAX: i64 = 36525 * 86400;
     match n.checked_mul(secs) {
         Some(total) if total <= MAX => Ok(SignedDuration::from_secs(total)),
         _ => Err(bad(format!("duration {s:?} is longer than 100 years"))),
@@ -529,7 +529,7 @@ fn multiline(t: &InlineTable) -> bool {
     t.iter().any(|(k, _)| prefix(t, k).contains('\n')) || t.trailing().as_str().is_some_and(|s| s.contains('\n'))
 }
 
-/// Edits a multi-line inline table line by line. toml_edit keeps each comment in the prefix of
+/// Edits a multi-line inline table line by line. `toml_edit` keeps each comment in the prefix of
 /// the next key (or the table's trailing text): up to the first newline it ends the line above,
 /// after it it is a line of its own above that key.
 fn edit_lines(t: &mut InlineTable, req: &SkillReq) {
@@ -565,7 +565,7 @@ fn edit_lines(t: &mut InlineTable, req: &SkillReq) {
             }
         }
     }
-    for (k, v) in want.iter() {
+    for (k, v) in &want {
         if t.contains_key(k) {
             set(t, k, Some(v.clone()));
             continue;
@@ -677,7 +677,8 @@ min-release-age = "12h"
         assert!(parse("[agents]\ntargets = [\"../x\"]", false).is_err());
         assert!(parse("[agents]\ntargets = [\"a\\\\b\"]", false).is_err());
         assert!(parse("[agents]\nlocal = \"..\\\\x\"", false).is_err());
-        assert!(parse("[policy]\npackagist = false", false).unwrap().repositories.is_empty());
+        let off = parse("[policy]\npackagist = false", false).unwrap();
+        assert!(off.repositories.is_empty(), "{:?}", off.repositories);
         let gh = |entry: &str| parse(&format!("[repositories]\nr = {{ url = \"https://r\" }}\n[skills]\n\"a/b\" = {entry}"), false);
         assert!(gh("{ github = true, ref = \"main\" }").is_ok());
         assert!(gh("{ github = true, version = \"^1.0\", ref = \"main\" }").is_err());
@@ -726,7 +727,8 @@ min-release-age = "12h"
         assert!(text.contains(r#"rename = { x = "y" }"#), "{text}");
         assert_eq!(parse(&text, false).unwrap().skills, [renamed]);
         remove_skills(dir.path(), false, &["a/b".into()]).unwrap();
-        assert!(parse(&std::fs::read_to_string(dir.path().join(FILE)).unwrap(), false).unwrap().skills.is_empty());
+        let written = parse(&std::fs::read_to_string(dir.path().join(FILE)).unwrap(), false).unwrap();
+        assert!(written.skills.is_empty(), "{:?}", written.skills);
     }
 
     #[test]
@@ -787,7 +789,7 @@ min-release-age = "12h"
     fn enforced_age_binds_repositories() {
         let doc: DocumentMut = "[policy]\nmin-release-age = \"3d\"\nenforce = [\"min-release-age\"]\n[policy.repository-min-release-age]\n\"https://git.example.com/\" = \"0\"\n\"https://git.example.com/slow/\" = \"5d\"".parse().unwrap();
         let config = crate::policy::layer(doc.get("policy").and_then(Item::as_table_like), "config.toml", true).unwrap();
-        let o = crate::policy::Outer { config, config_path: "config.toml".into(), env: Default::default() };
+        let o = crate::policy::Outer { config, config_path: "config.toml".into(), env: crate::policy::Layer::default() };
         let m = |repo: &str| parse_with(&format!("[repositories]\nr = {{ url = {repo} }}"), false, &o);
         let age = |m: Manifest| m.min_release_age(&m.repositories[0]);
 
