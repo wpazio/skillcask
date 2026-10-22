@@ -36,16 +36,16 @@ fn add_creates_everything_and_frozen_clone_reproduces_it() {
     let lock = p.read("skills.lock");
     assert!(lock.contains("version = \"v1.2.3\"") && lock.contains("tree-sha256") && lock.contains("reference = \"ref0\""), "{lock}");
     assert_eq!(p.read(".agents/skills/one/SKILL.md"), skill_md("one"));
-    for t in [".claude/skills/one", ".junie/skills/one"] {
-        let meta = std::fs::symlink_metadata(p.path().join(t)).unwrap();
-        if cfg!(unix) {
-            assert!(meta.file_type().is_symlink(), "{t}");
-            assert_eq!(std::fs::read_link(p.path().join(t)).unwrap(), std::path::Path::new("../../.agents/skills/one"));
-        }
-        assert_eq!(p.read(&format!("{t}/SKILL.md")), skill_md("one"));
+    assert!(!p.exists(".junie"), "the default targets are [\"claude\"] (D29)");
+    let t = ".claude/skills/one";
+    let meta = std::fs::symlink_metadata(p.path().join(t)).unwrap();
+    if cfg!(unix) {
+        assert!(meta.file_type().is_symlink(), "{t}");
+        assert_eq!(std::fs::read_link(p.path().join(t)).unwrap(), std::path::Path::new("../../.agents/skills/one"));
     }
+    assert_eq!(p.read(&format!("{t}/SKILL.md")), skill_md("one"));
     let gi = p.read(".gitignore");
-    assert!(gi.contains("/.agents/skills/one/") && gi.contains("/.claude/skills/one") && gi.contains("/.junie/skills/one"), "{gi}");
+    assert!(gi.contains("/.agents/skills/one/") && gi.contains("/.claude/skills/one"), "{gi}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -444,16 +444,19 @@ fn publish_then_install_round_trip() {
     assert!(text.contains("published acme/beta 2.1.0"), "{text}");
     s.serve_dir(&out);
 
+    let files = ["packages.json", "p2/acme/alpha.json", "p2/acme/beta.json", "dist/acme/gamma/0.3.0.zip"];
     let snapshot = || {
         let mut v = Vec::new();
-        for f in ["packages.json", "p2/acme/alpha.json", "p2/acme/beta.json", "dist/acme/gamma/0.3.0.zip"] {
+        for f in files {
             let m = std::fs::metadata(out.join(f)).unwrap();
             v.push((f, m.modified().unwrap(), std::fs::read(out.join(f)).unwrap()));
         }
         v
     };
+    for f in files {
+        backdate(&out.join(f));
+    }
     let first = snapshot();
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     assert!(publish(&p).contains("unchanged acme/alpha 1.0.0"));
     assert_eq!(snapshot(), first, "second publish of unchanged skills changes no file");
 
@@ -512,9 +515,8 @@ fn version_prints_commit() {
     p.ok(&["install"]);
 }
 
-/// End to end against Packagist: `cargo test -- --ignored`.
 #[test]
-#[ignore]
+#[ignore = "live Packagist: cargo test --test cli -- --ignored"]
 fn packagist_netresearch_jira() {
     let dir = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_skillcask");
@@ -558,15 +560,6 @@ fn project_skills_in_dot_skills_are_linked_and_committable() {
     p.write(".skills/one/SKILL.md", &skill_md("one"));
     let out = p.expect(&["install"], 1);
     assert!(out.contains("both a project skill") && out.contains("rename = { one = \"acme-one\" }"), "{out}");
-}
-
-fn gh_commit(sha: &str, hours: i64) -> serde_json::Value {
-    json!({ "sha": sha, "commit": { "committer": { "date": ago(hours) } } })
-}
-
-fn with_github(mut p: Project, s: &Server) -> Project {
-    p.env.push(("SKILLCASK_GITHUB_API".into(), s.base.clone()));
-    p
 }
 
 #[test]
@@ -856,7 +849,7 @@ fn global_targets_may_be_named_like_the_project_local_dir() {
     p.global_manifest(&s, "");
     let cfg = p.home().join(".config/skillcask/skills.toml");
     let text = std::fs::read_to_string(&cfg).unwrap();
-    std::fs::write(&cfg, format!("{text}\n[agents]\ntargets = [\".skills\"]\n")).unwrap();
+    std::fs::write(&cfg, text.replace("targets = [\".claude/skills\", \".junie/skills\"]", "targets = [\"./.skills\"]")).unwrap();
     p.global(&["add", "acme/one"], 0);
     assert!(p.home().join(".skills/one/SKILL.md").is_file());
     p.global(&["remove", "acme/one"], 0);
@@ -907,6 +900,18 @@ fn global_needs_a_home() {
     p.env.push(("HOME".into(), String::new()));
     p.env.push(("USERPROFILE".into(), String::new()));
     assert!(p.global(&["status"], 1).contains("--global needs HOME"));
+}
+
+#[test]
+fn the_environment_applies_without_a_home() {
+    let s = Server::start();
+    let mut p = Project::new(&s);
+    p.manifest(&s, "\"acme/one\" = \"^1.0\"\n");
+    p.env.push(("HOME".into(), String::new()));
+    p.env.push(("USERPROFILE".into(), String::new()));
+    p.env.push(("SKILLCASK_ALLOW_RANGES".into(), "false".into()));
+    let out = p.expect(&["status"], 1);
+    assert!(out.contains("allow-ranges = false requires an exact version"), "{out}");
 }
 
 #[test]

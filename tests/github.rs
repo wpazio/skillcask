@@ -4,15 +4,6 @@ mod common;
 use common::*;
 use serde_json::json;
 
-fn gh_commit(sha: &str, hours: i64) -> serde_json::Value {
-    json!({ "sha": sha, "commit": { "committer": { "date": ago(hours) } } })
-}
-
-fn with_github(mut p: Project, s: &Server) -> Project {
-    p.env.push(("SKILLCASK_GITHUB_API".into(), s.base.clone()));
-    p
-}
-
 #[test]
 fn a_backdated_tag_waits_for_its_release_time() {
     let s = Server::start();

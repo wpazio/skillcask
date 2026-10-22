@@ -72,6 +72,9 @@ fn candidate(name: &str, version: String, parsed: Version, sha: &str, time: Opti
         dist_shasum: None,
         // Empty: the skills are discovered in the archive.
         skill_paths: Vec::new(),
+        abandoned: None,
+        description: None,
+        license: Vec::new(),
     }
 }
 

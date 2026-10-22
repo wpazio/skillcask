@@ -8,9 +8,10 @@ use jiff::SignedDuration;
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::bail;
-use crate::error::{Error, MANIFEST, Result};
+use crate::error::{Context, Error, MANIFEST, Result};
 
 pub const CONFIG: &str = "config.toml";
+pub const REPOSITORY_AGES: &str = "repository-min-release-age";
 pub const KEYS: [&str; 5] = ["min-release-age", "allow-ranges", "packagist", "github-requires", "allow-sources"];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -38,6 +39,9 @@ impl std::fmt::Display for Value {
 pub struct Layer {
     pub values: BTreeMap<&'static str, Value>,
     pub enforce: BTreeSet<&'static str>,
+    /// `config.toml` only: URL prefix to the cooldown an enforced `min-release-age` allows for
+    /// repositories under it (D28).
+    pub repository_ages: BTreeMap<String, SignedDuration>,
 }
 
 /// The layers around a manifest: the user config and the environment.
@@ -47,6 +51,8 @@ pub struct Outer {
     /// Shown in messages; empty when there is no config file.
     pub config_path: String,
     pub env: Layer,
+    /// `[agents] targets` of `config.toml` (D29).
+    pub targets: Option<Vec<String>>,
 }
 
 /// Each key that is set, its value and the layer it came from.
@@ -116,6 +122,18 @@ pub fn layer(t: Option<&dyn TableLike>, file: &str, config: bool) -> Result<Laye
             }
             continue;
         }
+        if config && k == REPOSITORY_AGES {
+            let t = item.as_table_like().ok_or_else(|| bad(k, "must be a table of URL prefix = age".into()))?;
+            for (prefix, age) in t.iter() {
+                if !prefix.starts_with("https://") || prefix.len() == "https://".len() {
+                    return Err(bad(k, format!("{prefix:?} is not an https:// URL prefix")));
+                }
+                let age = age.as_str().ok_or_else(|| bad(k, format!("{prefix:?} must be a string such as \"3d\"")))?;
+                let age = crate::manifest::parse_age(age).map_err(|e| bad(k, format!("{prefix:?}: {}", e.msg)))?;
+                out.repository_ages.insert(prefix.to_string(), age);
+            }
+            continue;
+        }
         let Some(k) = key(k) else {
             if config {
                 bail!(MANIFEST, "{file}: unknown key policy.{k}");
@@ -127,6 +145,9 @@ pub fn layer(t: Option<&dyn TableLike>, file: &str, config: bool) -> Result<Laye
     }
     if let Some(k) = out.enforce.iter().find(|k| !out.values.contains_key(*k)) {
         bail!(MANIFEST, "{file}: policy.enforce lists {k}, which policy does not set");
+    }
+    if !out.repository_ages.is_empty() && !out.enforce.contains("min-release-age") {
+        bail!(MANIFEST, "{file}: policy.{REPOSITORY_AGES} needs min-release-age in policy.enforce");
     }
     Ok(out)
 }
@@ -153,22 +174,34 @@ pub fn outer() -> Result<Outer> {
     let Some(path) = crate::scope::config_dir().map(|d| d.join(CONFIG)) else {
         return Ok(Outer { env, ..Default::default() });
     };
-    let (config, config_path) = read_config(&path)?;
-    Ok(Outer { config, config_path, env })
+    let (config, targets, config_path) = read_config(&path)?;
+    Ok(Outer { config, config_path, env, targets })
 }
 
-fn read_config(path: &Path) -> Result<(Layer, String)> {
+fn read_config(path: &Path) -> Result<(Layer, Option<Vec<String>>, String)> {
+    let shown = path.display().to_string();
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Layer::default(), String::new())),
-        Err(e) => return Err(e.into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Layer::default(), None, String::new())),
+        Err(e) => return Err(e).ctx(&shown),
     };
-    let shown = path.display().to_string();
     let doc: DocumentMut = text.parse().map_err(|e| Error::new(MANIFEST, format!("{shown}: {e}")))?;
-    if let Some((k, _)) = doc.iter().find(|(k, _)| *k != "policy") {
-        bail!(MANIFEST, "{shown}: only [policy] is read here, found {k}");
+    if let Some((k, _)) = doc.iter().find(|(k, _)| !matches!(*k, "policy" | "agents")) {
+        bail!(MANIFEST, "{shown}: only [policy] and [agents] are read here, found {k}");
     }
-    Ok((layer(doc.get("policy").and_then(Item::as_table_like), &shown, true)?, shown))
+    let mut targets = None;
+    if let Some(a) = doc.get("agents") {
+        let a = a.as_table_like().ok_or_else(|| Error::new(MANIFEST, format!("{shown}: agents must be a table")))?;
+        for (k, item) in a.iter() {
+            if k != "targets" {
+                bail!(MANIFEST, "{shown}: agents.{k} is not read here, only agents.targets");
+            }
+            let list = item.as_array().and_then(|l| l.iter().map(|v| v.as_str().map(String::from)).collect::<Option<Vec<_>>>());
+            targets =
+                Some(list.ok_or_else(|| Error::new(MANIFEST, format!("{shown}: agents.targets must be a list of agent names or paths")))?);
+        }
+    }
+    Ok((layer(doc.get("policy").and_then(Item::as_table_like), &shown, true)?, targets, shown))
 }
 
 /// Set once the environment-over-`enforce` warnings are printed: a run loads the manifest more than once.
@@ -217,6 +250,12 @@ pub fn resolve(project: &Layer, o: &Outer) -> Result<Effective> {
     Ok(out)
 }
 
+/// With `min-release-age` enforced, the shortest cooldown a project may give the repository at
+/// `url`: the longest matching prefix of `repository-min-release-age`, else the enforced value.
+pub fn repository_floor(o: &Outer, url: &str, enforced: SignedDuration) -> SignedDuration {
+    o.config.repository_ages.iter().filter(|(p, _)| under(url, p)).max_by_key(|(p, _)| p.len()).map_or(enforced, |(_, a)| *a)
+}
+
 /// `url` is `prefix` or below it on a `/` (or query) boundary.
 pub fn under(url: &str, prefix: &str) -> bool {
     url == prefix || url.starts_with(prefix) && (prefix.ends_with('/') || url[prefix.len()..].starts_with(['/', '?']))
@@ -239,7 +278,7 @@ mod tests {
     #[test]
     fn layers_in_order() {
         let config = cfg("[policy]\nallow-sources = [\"https://git.example.com/\"]\nmin-release-age = \"1d\"\nallow-ranges = false\nenforce = [\"allow-sources\"]").unwrap();
-        let o = Outer { config, config_path: "config.toml".into(), env: Layer::default() };
+        let o = Outer { config, config_path: "config.toml".into(), ..Default::default() };
         let p = proj("[policy]\nmin-release-age = \"2d\"");
         let e = resolve(&p, &o).unwrap();
         assert_eq!(e["min-release-age"], (Value::Age(SignedDuration::from_hours(48)), "skills.toml"));
@@ -265,13 +304,23 @@ mod tests {
         assert!(cfg("[policy]\ntypo = true").unwrap_err().msg.contains("unknown key"));
         assert!(cfg("[policy]\nenforce = [\"packagist\"]").unwrap_err().msg.contains("does not set"));
         assert!(cfg("[policy]\nenforce = [\"nope\"]").is_err());
+        let ages = "[policy]\nmin-release-age = \"1d\"\n[policy.repository-min-release-age]\n";
+        assert!(cfg(&format!("{ages}\"https://a/\" = \"0\"")).unwrap_err().msg.contains("needs min-release-age in policy.enforce"));
+        let ages = ages.replace("\n[", "\nenforce = [\"min-release-age\"]\n[");
+        assert!(cfg(&format!("{ages}\"https://a/\" = \"0\"")).is_ok());
+        assert!(cfg(&format!("{ages}acme = \"0\"")).unwrap_err().msg.contains("not an https:// URL prefix"));
+        assert!(cfg(&format!("{ages}\"https://a/\" = 0")).is_err());
         assert!(proj("[policy]\ntypo = true").values.is_empty());
         assert!(env_layer(|k| (k == "SKILLCASK_ALLOW_RANGES").then(|| "yes".to_string())).is_err());
         assert!(env_layer(|_| Some(" ".into())).unwrap().values.is_empty());
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(CONFIG), "[repositories]\nx = 1\n").unwrap();
-        assert!(read_config(&dir.path().join(CONFIG)).unwrap_err().msg.contains("only [policy]"));
+        assert!(read_config(&dir.path().join(CONFIG)).unwrap_err().msg.contains("only [policy] and [agents]"));
         assert_eq!(read_config(&dir.path().join("missing.toml")).unwrap().0, Layer::default());
+        std::fs::write(dir.path().join(CONFIG), "[agents]\ntargets = [\"claude\", \"./x\"]\n").unwrap();
+        assert_eq!(read_config(&dir.path().join(CONFIG)).unwrap().1, Some(vec!["claude".into(), "./x".into()]));
+        std::fs::write(dir.path().join(CONFIG), "[agents]\nlocal = \".skills\"\n").unwrap();
+        assert!(read_config(&dir.path().join(CONFIG)).unwrap_err().msg.contains("agents.local is not read here"));
     }
 
     #[test]
@@ -289,5 +338,29 @@ mod tests {
         assert!(!under("https://git.example.com.evil/a", "https://git.example.com"));
         assert!(!under("https://api.github.com/repos/acmex/r", "https://api.github.com/repos/acme"));
         assert!(under("https://api.github.com/repos/acme/r", "https://api.github.com/repos/acme"));
+    }
+
+    #[test]
+    fn source_entries_value_types_and_unreadable_config() {
+        let project = |t: &str| {
+            let doc: DocumentMut = t.parse().unwrap();
+            layer(doc.get("policy").and_then(Item::as_table_like), "skills.toml", false)
+        };
+        // Neither file takes an empty entry, a bare scheme, a plain-http URL or a name with a space.
+        for bad in ["", "https://", "http://example.com", "a b"] {
+            let t = format!("[policy]\nallow-sources = [{bad:?}]");
+            assert!(project(&t).is_err(), "{bad:?}");
+            assert!(cfg(&t).unwrap_err().msg.contains("is not packagist"), "{bad:?}");
+        }
+        assert!(project("[policy]\nallow-sources = [\"https://h\", \"acme\"]").is_ok());
+        assert!(cfg("[policy]\nmin-release-age = true").unwrap_err().msg.contains("must be a string"));
+        assert!(cfg("[policy]\nallow-sources = true").unwrap_err().msg.contains("must be a list"));
+        for (s, b) in [("true", true), ("false", false)] {
+            let l = env_layer(|k| (k == "SKILLCASK_ALLOW_RANGES").then(|| s.to_string())).unwrap();
+            assert_eq!(l.values["allow-ranges"], Value::Bool(b), "{s}");
+        }
+        // Only a missing config is an empty layer; one that exists but cannot be read is an error.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_config(dir.path()).is_err());
     }
 }

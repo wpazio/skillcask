@@ -50,8 +50,8 @@ fn crlf_gitignore_keeps_its_line_endings() {
     let gi = p.read(".gitignore");
     assert!(gi.starts_with("/vendor\r\n/secrets.env\r\n") && gi.contains("/.agents/skills/one/\r\n"), "{gi:?}");
     assert!(!gi.replace("\r\n", "").contains('\n'), "{gi:?}");
+    backdate(&p.path().join(".gitignore"));
     let before = mtime(&p, ".gitignore");
-    std::thread::sleep(std::time::Duration::from_millis(50));
     p.ok(&["install"]);
     assert_eq!(p.read(".gitignore"), gi);
     assert_eq!(mtime(&p, ".gitignore"), before, "the second run rewrote .gitignore");
@@ -172,15 +172,6 @@ fn dangling_project_link_in_the_store_does_not_break_add() {
     p.ok(&["status"]);
 }
 
-fn backdate(dir: &std::path::Path, t: std::time::SystemTime) {
-    let mut o = std::fs::OpenOptions::new();
-    o.read(true);
-    // Windows opens a directory handle only with FILE_FLAG_BACKUP_SEMANTICS, and needs write access to set times.
-    #[cfg(windows)]
-    std::os::windows::fs::OpenOptionsExt::custom_flags(o.write(true), 0x0200_0000);
-    o.open(dir).unwrap().set_modified(t).unwrap();
-}
-
 #[test]
 fn leftover_temp_dirs_are_cleaned_and_ignored() {
     let s = Server::start();
@@ -188,9 +179,8 @@ fn leftover_temp_dirs_are_cleaned_and_ignored() {
     p.write(".agents/skills/.skillcask-tmp-abc/x", "x");
     p.write(".agents/skills/.skillcask-old-one-1/SKILL.md", "x");
     p.write(".agents/skills/.skillcask-tmp-fresh/x", "x");
-    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
     for d in [".skillcask-tmp-abc", ".skillcask-old-one-1"] {
-        backdate(&p.path().join(".agents/skills").join(d), two_hours_ago);
+        backdate(&p.path().join(".agents/skills").join(d));
     }
     // A live run (its lock held) owns its dirs however old; a dead run's go at once.
     p.write(".agents/skills/.skillcask-tmp-4001-ab/x", "x");
@@ -201,7 +191,7 @@ fn leftover_temp_dirs_are_cleaned_and_ignored() {
     let live = std::fs::File::open(p.path().join(".agents/skills/.skillcask-run-4001")).unwrap();
     live.lock().unwrap();
     for d in [".skillcask-tmp-4001-ab", ".skillcask-old-one-4001"] {
-        backdate(&p.path().join(".agents/skills").join(d), two_hours_ago);
+        backdate(&p.path().join(".agents/skills").join(d));
     }
     p.ok(&["install"]);
     assert!(!p.exists(".agents/skills/.skillcask-tmp-abc") && !p.exists(".agents/skills/.skillcask-old-one-1"));

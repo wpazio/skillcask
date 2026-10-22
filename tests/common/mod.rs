@@ -1,6 +1,6 @@
 //! Test harness: a local HTTPS server (test CA) serving a fixture Composer repository, and a
 //! wrapper that runs the skillcask binary in an isolated project directory.
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test binary uses its own subset of the harness")]
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -22,6 +22,8 @@ struct State {
     requests: Vec<Request>,
     /// Canned responses by path, with or without the query string.
     responses: HashMap<String, Canned>,
+    /// One-shot responses by path, served in order before anything else.
+    queued: HashMap<String, std::collections::VecDeque<Canned>>,
 }
 
 type Canned = (u16, Vec<(String, String)>, Vec<u8>);
@@ -108,6 +110,12 @@ impl Server {
         self.state.lock().unwrap().responses.insert(path.to_string(), (status, headers, body.into()));
     }
 
+    /// Answers the next request for `path` (without query) once with this response.
+    pub fn respond_once(&self, path: &str, status: u16, headers: &[(&str, &str)], body: impl Into<Vec<u8>>) {
+        let headers = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        self.state.lock().unwrap().queued.entry(path.to_string()).or_default().push_back((status, headers, body.into()));
+    }
+
     pub fn redirect(&self, path: &str, location: &str) {
         self.respond(path, 302, &[("Location", location)], "");
     }
@@ -140,6 +148,8 @@ fn handle(s: &mut (impl Read + Write), st: &Mutex<State>) -> std::io::Result<()>
         let path_only = path.split('?').next().unwrap_or("");
         if st.auth.is_some() && st.auth != auth {
             (401, Vec::new(), Vec::new())
+        } else if let Some(r) = st.queued.get_mut(path_only).and_then(|q| q.pop_front()) {
+            r
         } else if let Some(r) = st.responses.get(&path).or_else(|| st.responses.get(path_only)) {
             r.clone()
         } else if let Some(b) = st.files.get(path_only) {
@@ -178,6 +188,29 @@ pub fn skill_md(name: &str) -> String {
 
 pub fn ago(hours: i64) -> String {
     (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(hours)).round(jiff::Unit::Second).unwrap().to_string()
+}
+
+/// A GitHub commit response committed `hours` ago.
+pub fn gh_commit(sha: &str, hours: i64) -> Value {
+    json!({ "sha": sha, "commit": { "committer": { "date": ago(hours) } } })
+}
+
+/// Points the GitHub API at the test server.
+pub fn with_github(mut p: Project, s: &Server) -> Project {
+    p.env.push(("SKILLCASK_GITHUB_API".into(), s.base.clone()));
+    p
+}
+
+/// Sets the mtime of a file or directory to a fixed time years in the past: a later write shows
+/// without sleeping past the file system's timestamp resolution, and a stale-age check trips.
+pub fn backdate(path: &Path) {
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    // Windows opens a directory handle only with FILE_FLAG_BACKUP_SEMANTICS, and needs write access to set times.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(o.write(true), 0x0200_0000);
+    o.open(path).unwrap().set_modified(past).unwrap();
 }
 
 pub struct Ver<'a> {
@@ -275,7 +308,7 @@ impl Project {
         std::fs::write(
             dir.join("skills.toml"),
             format!(
-                "[repositories]\nfix = {{ type = \"composer\", url = \"{}\" }}\n\n[skills]\n{skills}\n[policy]\npackagist = false\n",
+                "[repositories]\nfix = {{ type = \"composer\", url = \"{}\" }}\n\n[skills]\n{skills}\n[agents]\ntargets = [\".claude/skills\", \".junie/skills\"]\n\n[policy]\npackagist = false\n",
                 server.url("/packages.json")
             ),
         )
@@ -286,7 +319,7 @@ impl Project {
         self.write(
             "skills.toml",
             &format!(
-                "[repositories]\nfix = {{ type = \"composer\", url = \"{}\" }}\n\n[skills]\n{skills}\n[policy]\npackagist = false\n",
+                "[repositories]\nfix = {{ type = \"composer\", url = \"{}\" }}\n\n[skills]\n{skills}\n[agents]\ntargets = [\".claude/skills\", \".junie/skills\"]\n\n[policy]\npackagist = false\n",
                 server.url("/packages.json")
             ),
         );

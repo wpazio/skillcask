@@ -2,7 +2,7 @@ use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path};
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
@@ -27,6 +27,8 @@ pub struct Ctx {
     pub limits: Limits,
     /// stdin and stderr are terminals and CI is unset: conflicts may prompt for a rename.
     pub interactive: bool,
+    /// The command installs nothing: dists unpack in the system temp dir, not in the store.
+    pub read_only: bool,
     http: OnceCell<Http>,
 }
 
@@ -68,7 +70,7 @@ impl Fetched {
 
 impl Ctx {
     pub fn new(s: Scope, verbose: bool, limits: Limits, interactive: bool) -> Ctx {
-        Ctx { s, verbose, limits, interactive, http: OnceCell::new() }
+        Ctx { s, verbose, limits, interactive, read_only: false, http: OnceCell::new() }
     }
 
     fn http(&self) -> Result<&Http> {
@@ -107,21 +109,100 @@ impl Ctx {
                 bail!(HASH, "{name}: downloaded archive has sha1 {sha1}, the repository metadata says {s}");
             }
         }
-        let dir = project::temp_dir(&self.s)?;
+        let dir = if self.read_only { tempfile::tempdir()? } else { project::temp_dir(&self.s)? };
         let x = archive::extract(&bytes, dir.path(), &self.limits).ctx(name)?;
         Ok((sha, Fetched { dir, entries: x.files, links: x.links, skipped: x.skipped }))
     }
 
     /// `locked`: the entry's lock entry before this command, if any.
     fn resolve(&self, m: &Manifest, req: &SkillReq, locked: Option<&Package>, prepared: &mut HashMap<String, Fetched>) -> Result<Package> {
+        let (repo, c) = self.candidate(m, req, locked)?;
+        let p = self.lock_candidate(req, &repo, &c, None, prepared)?;
+        // The same dist as the lock's was scanned when it was locked.
+        if locked.is_none_or(|l| l.dist_sha256 != p.dist_sha256) {
+            warn_invisible(&prepared[&p.name], &p)?;
+        }
+        Ok(p)
+    }
+
+    /// The version `update` locks for `req`: same repository, policy and cooldown.
+    fn candidate(&self, m: &Manifest, req: &SkillReq, locked: Option<&Package>) -> Result<(Repository, Candidate)> {
         if req.github.is_some() {
             m.check_github(&req.name)?;
             let c = github::resolve(self.http()?, req, m.policy.min_release_age, Timestamp::now())?;
-            return self.lock_candidate(req, &github::repository(&req.name), &c, None, prepared);
+            return Ok((github::repository(&req.name), c));
         }
         let (repo, cands) = find(&Registry::new(self.http()?), m, req, locked)?;
         let c = registry::select(&cands, &req.name, &req.constraint, m.min_release_age(&repo), Timestamp::now())?;
-        self.lock_candidate(req, &repo, &c, None, prepared)
+        Ok((repo, c))
+    }
+
+    /// The newest version of `req`'s package matching `v`, without the cooldown: the user named it.
+    fn candidate_at(&self, m: &Manifest, req: &SkillReq, locked: Option<&Package>, v: &str) -> Result<(Repository, Candidate)> {
+        if req.github.is_some() {
+            m.check_github(&req.name)?;
+            let mode = if Constraint::parse(v).is_ok() { GitHub::Tags } else { GitHub::Ref };
+            let r = SkillReq { constraint: v.to_string(), github: Some(mode), ..req.clone() };
+            return Ok((github::repository(&req.name), github::resolve(self.http()?, &r, SignedDuration::ZERO, Timestamp::now())?));
+        }
+        let (repo, cands) = find(&Registry::new(self.http()?), m, req, locked)?;
+        let c = registry::select(&cands, &req.name, v, SignedDuration::ZERO, Timestamp::now())?;
+        Ok((repo, c))
+    }
+
+    /// Prints a unified diff from `old`'s skills, as installed (none for a package new to the
+    /// lock), to `new`'s in `f`. `scan`: warn about invisible Unicode in the files that changed.
+    fn show_diff(&self, old: Option<&Package>, new: &Package, f: &Fetched, scan: bool) -> Result<()> {
+        let title = match old {
+            Some(o) => format!("{} {} -> {}", new.name, o.version, new.version),
+            None => format!("{} {} (new)", new.name, new.version),
+        };
+        println!("{}", ui::out(ui::Color::Cyan, skill::shown(&title)));
+        let mut old_dist: Option<Fetched> = None;
+        let mut before: BTreeMap<&str, Tree> = BTreeMap::new();
+        for (old, sk) in old.iter().flat_map(|o| o.skills.iter().map(move |sk| (*o, sk))) {
+            let tree = if installed_ok(&self.s, sk) {
+                let dir = project::store_dir(&self.s, &sk.name);
+                let mut files = skill::scan_dir(&dir)?;
+                if !cfg!(unix) {
+                    let modes = project::read_modes(&self.s);
+                    for e in &mut files {
+                        e.exec = modes.contains(&format!("{}/{}", sk.name, e.path));
+                    }
+                }
+                read_tree(&dir, files, None)?
+            } else {
+                if old_dist.is_none() {
+                    old_dist = Some(self.fetch(&old.name, &old.dist, Some(&old.dist_sha256), None)?.1);
+                }
+                installed_tree(old_dist.as_ref().expect("fetched above"), old, sk)?
+            };
+            before.insert(&sk.name, tree);
+        }
+        let mut after: BTreeMap<&str, Tree> = BTreeMap::new();
+        for sk in &new.skills {
+            after.insert(&sk.name, installed_tree(f, new, sk)?);
+        }
+        let none = Tree::new();
+        let mut warnings = Vec::new();
+        for n in before.keys().chain(after.keys()).collect::<BTreeSet<_>>() {
+            let (a, b) = (before.get(n).unwrap_or(&none), after.get(n).unwrap_or(&none));
+            for path in a.keys().chain(b.keys()).collect::<BTreeSet<_>>() {
+                let (x, y) = (a.get(path), b.get(path));
+                if x == y {
+                    continue;
+                }
+                let label = format!("{n}/{path}");
+                print_file_diff(&label, x, y);
+                if let Some((_, bytes)) = y.filter(|_| scan) {
+                    warnings.extend(skill::invisible_warnings(&label, bytes));
+                }
+            }
+        }
+        for w in warnings {
+            ui::warn(format!("{}: {w}", new.name));
+        }
+        Ok(())
     }
 
     /// The locked version again, with the entry's current selection and rename, when it still
@@ -149,15 +230,7 @@ impl Ctx {
                 if !same_mode || !(same_ref || g == GitHub::Tags && fits()) {
                     return Ok(None);
                 }
-                Candidate {
-                    name: p.name.clone(),
-                    version: p.version.clone(),
-                    parsed: version::Version::parse(&p.version).or_else(|| version::Version::parse("0.0.0")).expect("valid"),
-                    time: p.released,
-                    dist: p.dist.clone(),
-                    dist_shasum: None,
-                    skill_paths: Vec::new(),
-                }
+                locked_candidate(p)
             }
             None => {
                 let Some(repo) = locked_repository(m, req, Some(p)).filter(|_| fits()) else { return Ok(None) };
@@ -534,7 +607,8 @@ impl Ctx {
                 project::place(s, &sk.name, &f.dir.path().join(&sk.path))?;
                 if let Some(md) = skill_md {
                     // Truncates in place, so the copied mode stays.
-                    std::fs::write(project::store_dir(s, &sk.name).join(skill::SKILL_MD), md)?;
+                    let shown = s.show(&format!("{STORE}/{}/{}", sk.name, skill::SKILL_MD));
+                    std::fs::write(project::store_dir(s, &sk.name).join(skill::SKILL_MD), md).ctx(shown)?;
                 }
                 set_modes(&mut modes, &sk.name, &files);
                 crate::ui::done("installed", format!("{} ({} {})", sk.name, p.name, p.version));
@@ -552,9 +626,9 @@ impl Ctx {
             }
             let dir = project::store_dir(s, n);
             if dir.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
-                std::fs::remove_file(&dir)?;
+                std::fs::remove_file(&dir).ctx(s.show(&format!("{STORE}/{n}")))?;
             } else if dir.is_dir() {
-                std::fs::remove_dir_all(dir)?;
+                std::fs::remove_dir_all(dir).ctx(s.show(&format!("{STORE}/{n}")))?;
             }
             crate::ui::done("removed", n);
         }
@@ -572,6 +646,9 @@ impl Ctx {
                     }
                 }
             }
+        }
+        for (d, n) in dropped_links(s, m, &old_block) {
+            project::unlink(s, &d, &n)?;
         }
         let mut copies = BTreeSet::new();
         for (at, source, n) in plan {
@@ -593,6 +670,101 @@ impl Ctx {
             crate::ui::warn(w);
         }
         Ok(())
+    }
+}
+
+/// Warns about invisible Unicode in `p`'s skill files (D23).
+fn warn_invisible(f: &Fetched, p: &Package) -> Result<()> {
+    for sk in &p.skills {
+        for e in f.skill_files(&p.name, sk.from.as_ref().unwrap_or(&sk.name), &sk.path)? {
+            let path = if sk.path.is_empty() { e.path } else { format!("{}/{}", sk.path, e.path) };
+            for w in skill::invisible_warnings(&path, &std::fs::read(f.dir.path().join(&path))?) {
+                ui::warn(format!("{}: {w}", p.name));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A skill's files by NFC path: exec bit and content.
+type Tree = BTreeMap<String, (bool, Vec<u8>)>;
+
+fn read_tree(base: &Path, files: Vec<FileEntry>, rename: Option<&str>) -> Result<Tree> {
+    let nfc = icu_normalizer::ComposingNormalizerBorrowed::new_nfc();
+    let mut out = Tree::new();
+    for e in files {
+        let mut bytes = std::fs::read(base.join(&e.path))?;
+        if let Some(to) = rename.filter(|_| e.path == skill::SKILL_MD) {
+            bytes = skill::rename_frontmatter(&String::from_utf8_lossy(&bytes), to).into_bytes();
+        }
+        out.insert(nfc.normalize(&e.path).into_owned(), (e.exec, bytes));
+    }
+    Ok(out)
+}
+
+/// `sk` of `p` from its unpacked dist, as `install` would place it.
+fn installed_tree(f: &Fetched, p: &Package, sk: &LockedSkill) -> Result<Tree> {
+    let files = f.skill_files(&p.name, sk.from.as_ref().unwrap_or(&sk.name), &sk.path)?;
+    read_tree(&f.dir.path().join(&sk.path), files, sk.from.as_ref().map(|_| sk.name.as_str()))
+}
+
+/// `None` for binary content; a missing file is empty.
+fn text(f: Option<&(bool, Vec<u8>)>) -> Option<&str> {
+    match f {
+        None => Some(""),
+        Some((_, b)) => std::str::from_utf8(b).ok().filter(|t| !t.contains('\0')),
+    }
+}
+
+/// One file of a unified diff; package text is shown escaped (`skill::shown`).
+fn print_file_diff(label: &str, old: Option<&(bool, Vec<u8>)>, new: Option<&(bool, Vec<u8>)>) {
+    let label = skill::shown(label);
+    println!("--- {}", old.map_or("/dev/null".into(), |_| format!("a/{label}")));
+    println!("+++ {}", new.map_or("/dev/null".into(), |_| format!("b/{label}")));
+    let mode = |x: bool| if x { "100755" } else { "100644" };
+    match (old, new) {
+        (Some((x, _)), Some((y, _))) if x != y => println!("old mode {}\nnew mode {}", mode(*x), mode(*y)),
+        (None, Some((true, _))) => println!("new mode {}", mode(true)),
+        (Some((true, _)), None) => println!("old mode {}", mode(true)),
+        _ => {}
+    }
+    let (Some(a), Some(b)) = (text(old), text(new)) else {
+        if old.map(|f| &f.1) != new.map(|f| &f.1) {
+            println!("Binary files differ");
+        }
+        return;
+    };
+    let Some(lines) = crate::diff::unified(a, b, 3) else {
+        println!("Files differ (too large to show)");
+        return;
+    };
+    // CRLF files would show <U+000D> on every line; only a change of line ends needs it.
+    let crlf = |t: &str| t.matches('\n').count() == t.matches("\r\n").count();
+    let strip_cr = crlf(a) && crlf(b);
+    for l in lines {
+        let shown = skill::shown(if strip_cr { l.strip_suffix('\r').unwrap_or(&l) } else { &l });
+        match l.as_bytes().first() {
+            Some(b'+') => println!("{}", ui::out(ui::Color::Green, shown)),
+            Some(b'-') => println!("{}", ui::out(ui::Color::Red, shown)),
+            Some(b'@') => println!("{}", ui::out(ui::Color::Cyan, shown)),
+            _ => println!("{shown}"),
+        }
+    }
+}
+
+/// The locked version of a GitHub entry, as a candidate: its skills are discovered in the archive.
+fn locked_candidate(p: &Package) -> Candidate {
+    Candidate {
+        name: p.name.clone(),
+        version: p.version.clone(),
+        parsed: version::Version::parse(&p.version).or_else(|| version::Version::parse("0.0.0")).expect("valid"),
+        time: p.released,
+        dist: p.dist.clone(),
+        dist_shasum: None,
+        skill_paths: Vec::new(),
+        abandoned: None,
+        description: None,
+        license: Vec::new(),
     }
 }
 
@@ -846,6 +1018,30 @@ fn set_modes(modes: &mut BTreeSet<String>, name: &str, files: &[FileEntry]) {
     modes.extend(files.iter().filter(|f| f.exec).map(|f| format!("{prefix}{}", f.path)));
 }
 
+/// Links into the store in directories that are no longer targets (D29): those the managed block
+/// lists, and in a project the preset directories, where committed links of own skills live.
+fn dropped_links(s: &Scope, m: &Manifest, block: &[String]) -> Vec<(String, String)> {
+    let mut dirs: BTreeSet<String> = block
+        .iter()
+        .filter(|l| !l.contains('*') && !l.ends_with('/'))
+        .filter_map(|l| l.strip_prefix('/')?.rsplit_once('/').map(|(d, _)| d.to_string()))
+        .collect();
+    if !s.global {
+        dirs.extend(manifest::PRESETS.iter().filter_map(|p| p.1).map(String::from));
+    }
+    dirs.retain(|d| d != STORE && *d != m.local && !m.targets.contains(d) && project::no_symlink(s, d).is_ok());
+    let mut out = Vec::new();
+    for d in dirs {
+        for e in std::fs::read_dir(s.root.join(&d)).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if project::made_by_skillcask(s, &d, STORE, &n, block) {
+                out.push((d.clone(), n));
+            }
+        }
+    }
+    out
+}
+
 fn managed_paths(managed: &BTreeSet<String>, targets: &[String]) -> Vec<String> {
     managed.iter().flat_map(|n| std::iter::once(format!("{STORE}/{n}")).chain(targets.iter().map(move |t| format!("{t}/{n}")))).collect()
 }
@@ -909,9 +1105,7 @@ fn settle_deps(
             let current = lock.get(&req.name).cloned();
             let p = match ctx.relock(m, req, current.as_ref(), prepared)? {
                 Some(p) => p,
-                None => ctx
-                    .resolve(m, req, current.as_ref(), prepared)
-                    .map_err(|e| Error::new(e.code, format!("{}{}", e.msg, required_by(&w, &req.name))))?,
+                None => ctx.resolve(m, req, current.as_ref(), prepared).map_err(|e| e.map_msg(|m| m + &required_by(&w, &req.name)))?,
             };
             if current.is_none() && m.skill(&req.name).is_none() {
                 let by: Vec<&str> = w.by.get(&req.name).into_iter().flatten().map(|(r, _)| r.as_str()).collect();
@@ -969,13 +1163,18 @@ fn find(reg: &Registry, m: &Manifest, req: &SkillReq, locked: Option<&Package>) 
         if let Some(e) = req.repository.as_deref().and_then(|n| m.repository(n)).and_then(blocked) {
             return Err(e);
         }
-        return reg.find(&m.allowed_repositories(), &req.name, req.repository.as_deref());
+        let found = reg.find(&m.allowed_repositories(), &req.name, req.repository.as_deref())?;
+        registry::warn_abandoned(&found.1);
+        return Ok(found);
     };
     if let Some(e) = blocked(repo) {
         return Err(e);
     }
     match reg.versions(repo, &req.name)? {
-        Some(c) if !c.is_empty() => Ok((repo.clone(), c)),
+        Some(c) if !c.is_empty() => {
+            registry::warn_abandoned(&c);
+            Ok((repo.clone(), c))
+        }
         Some(_) => bail!(MANIFEST, "{} in repository {} has no installable ai-agent-skill versions", req.name, repo.name),
         None => {
             let url = url::Url::parse(&repo.url).map_or_else(|_| repo.name.clone(), |u| crate::http::redact(&u));
@@ -1017,8 +1216,8 @@ pub fn init(ctx: &Ctx) -> Result<()> {
     if path.exists() {
         bail!(MANIFEST, "{shown} already exists");
     }
-    std::fs::create_dir_all(&ctx.s.config)?;
-    std::fs::write(&path, manifest::template(ctx.s.global))?;
+    std::fs::create_dir_all(&ctx.s.config).ctx(ctx.s.config.display())?;
+    std::fs::write(&path, manifest::template(ctx.s.global)).ctx(&shown)?;
     crate::ui::done("created", &shown);
     Ok(())
 }
@@ -1137,6 +1336,7 @@ fn add_github(ctx: &Ctx, spec: &str) -> Result<()> {
 fn finish_add(ctx: &Ctx, m: &Manifest, req: &SkillReq, repo: &Repository, c: &Candidate, must_have: Option<&str>) -> Result<()> {
     let mut prepared = HashMap::new();
     let pkg = ctx.lock_candidate(req, repo, c, None, &mut prepared)?;
+    warn_invisible(&prepared[&pkg.name], &pkg)?;
     if let Some(s) = must_have {
         let have: Vec<&str> = pkg.skills.iter().map(|k| k.from.as_deref().unwrap_or(&k.name)).collect();
         if !have.contains(&s) {
@@ -1248,7 +1448,8 @@ fn fill_new_keys(m: &Manifest, lock: &mut Lock) -> bool {
     filled
 }
 
-pub fn update(ctx: &Ctx, names: &[String]) -> Result<()> {
+/// `diff`: print what changes in each updated or added package before writing the lock.
+pub fn update(ctx: &Ctx, names: &[String], diff: bool) -> Result<()> {
     let m = Manifest::load(&ctx.s.config, ctx.s.global)?;
     let mut lock = Lock::load(&ctx.s.config)?;
     let old = lock.clone();
@@ -1281,6 +1482,16 @@ pub fn update(ctx: &Ctx, names: &[String]) -> Result<()> {
             crate::ui::warn(format!("{n}: {why}; `skillcask install` updates its lock entry"));
         }
     }
+    // Before the lock is written, so a diff that cannot be shown changes nothing.
+    for n in newcomers.iter().filter(|_| diff) {
+        let o = old.get(n);
+        if let (Some(p), Some(f)) = (lock.get(n), prepared.get(n))
+            && o.is_none_or(|o| o.dist_sha256 != p.dist_sha256)
+        {
+            // Resolving already warned about invisible Unicode in every file.
+            ctx.show_diff(o, p, f, false)?;
+        }
+    }
     let m = settle_and_save(ctx, m, &mut lock, &old, &prepared, &newcomers)?;
     for r in report {
         say(&r);
@@ -1306,23 +1517,43 @@ fn settle_and_save(
     if changed.is_empty() { Ok(m) } else { Manifest::load(&ctx.s.config, ctx.s.global) }
 }
 
-pub fn outdated(ctx: &Ctx) -> Result<()> {
+/// `strict`: exit 1 when `update` would lock a newer version of a manifest entry.
+pub fn outdated(ctx: &Ctx, strict: bool) -> Result<()> {
     let m = Manifest::load(&ctx.s.config, ctx.s.global)?;
     let lock = Lock::load(&ctx.s.config)?;
+    // Only --strict needs what `update` resolves, and fails as `update` would on a conflict.
+    let w = if strict { deps::wanted(&m, &lock)?.reqs } else { Vec::new() };
     let reg = Registry::new(ctx.http()?);
     let now = Timestamp::now();
     let mut rows = vec![["package", "locked", "within constraint", "latest", "note"].map(String::from)];
+    let mut behind = Vec::new();
     for req in &m.skills {
-        let locked = lock.get(&req.name).map_or("-".into(), |p| p.version.clone());
+        let p = lock.get(&req.name);
+        let locked = p.map_or("-".into(), |p| p.version.clone());
+        // What `update` resolves: the constraint with those of requirers added.
+        let eff = w.iter().find(|r| r.name == req.name).unwrap_or(req);
         if req.github.is_some() {
             m.check_github(&req.name)?;
             let (within, latest) = github::newest(ctx.http()?, req)?;
             let dash = |v: Option<String>| v.unwrap_or_else(|| "-".into());
             rows.push([req.name.clone(), locked, dash(within), dash(latest), String::new()]);
+            if let Some(p) = p.filter(|_| strict) {
+                match ctx.candidate(&m, eff, Some(p)) {
+                    Ok((_, c)) if newer(eff, p, &c) => behind.push(format!("{} {} -> {}", req.name, p.version, c.version)),
+                    Ok(_) => {}
+                    Err(e) => ui::warn(e.msg),
+                }
+            }
             continue;
         }
-        let (repo, cands) = reg.find(&m.allowed_repositories(), &req.name, req.repository.as_deref())?;
+        let (repo, cands) = find(&reg, &m, req, p)?;
         let age = m.min_release_age(&repo);
+        if let Some(p) = p.filter(|_| strict)
+            && let Ok(c) = registry::select(&cands, &req.name, &eff.constraint, age, now)
+            && newer(eff, p, &c)
+        {
+            behind.push(format!("{} {} -> {}", req.name, p.version, c.version));
+        }
         let c = Constraint::parse(&req.constraint).map_err(|e| Error::new(MANIFEST, e))?;
         let within = registry::newest(&cands, Some(&c));
         let note = match within.and_then(|w| w.time.map(|t| (w, t))) {
@@ -1336,7 +1567,22 @@ pub fn outdated(ctx: &Ctx) -> Result<()> {
         rows.push([req.name.clone(), locked, v(within), v(registry::newest(&cands, None)), note]);
     }
     ui::table(&rows, |_, _| None);
+    if !behind.is_empty() {
+        return Err(Error::new(
+            MANIFEST,
+            format!("{} package(s) have a newer version within their constraint: {}", behind.len(), behind.join(", ")),
+        )
+        .hint("run skillcask update"));
+    }
     Ok(())
+}
+
+/// Whether `c` is newer than the locked `p`; a branch or commit entry compares commits.
+fn newer(req: &SkillReq, p: &Package, c: &Candidate) -> bool {
+    if req.github == Some(GitHub::Ref) {
+        return c.dist.reference != p.dist.reference;
+    }
+    version::Version::parse(&p.version).is_none_or(|v| c.parsed > v)
 }
 
 pub fn status(ctx: &Ctx) -> Result<()> {
@@ -1404,6 +1650,10 @@ pub fn status(ctx: &Ctx) -> Result<()> {
     for (k, (v, from)) in m.policy.effective.iter().filter(|_| !ui::agent()) {
         println!("{}", ui::out(ui::Color::Dim, format!("policy.{k} = {v} ({from})")));
     }
+    if !ui::agent() {
+        let dirs = if m.targets.is_empty() { format!("{STORE} only") } else { m.targets.join(", ") };
+        println!("{}", ui::out(ui::Color::Dim, format!("agents.targets = {:?} ({}): {dirs}", m.target_entries, m.targets_from)));
+    }
     if bad > 0 {
         return Err(Error::new(MANIFEST, format!("{bad} problem(s)")).hint("run skillcask install"));
     }
@@ -1428,9 +1678,12 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
     let hand = hand_written(s, &lock, &old_managed, &locals)?;
     let mut open = Vec::new();
     let mut fixed = Vec::new();
+    let mut passed = Vec::new();
 
     let mut copies = BTreeSet::new();
+    let (mut links, before) = (0, open.len());
     for (at, source, n) in link_plan(&m, &locked, &hand, &locals) {
+        links += 1;
         let state = project::link_state(s, &at, source, &n);
         let what = format!("{}: link {}", s.show(&format!("{at}/{n}")), format!("{state:?}").to_lowercase());
         if state != LinkState::Foreign && not_ours(s, &m, &at, &n, &state, &old_managed) {
@@ -1449,6 +1702,27 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
             copies.insert(format!("/{at}/{n}"));
         }
     }
+    if open.len() == before {
+        passed.push(format!("links: {links} ok"));
+    }
+
+    let dropped = dropped_links(s, &m, &project::read_block(s)?);
+    if dropped.is_empty() {
+        passed.push("targets: no links left in former target directories".to_string());
+    } else {
+        let what = format!(
+            "links in directories that are no longer targets: {}",
+            dropped.iter().map(|(d, n)| s.show(&format!("{d}/{n}"))).collect::<Vec<_>>().join(", ")
+        );
+        if fix {
+            for (d, n) in &dropped {
+                project::unlink(s, d, n)?;
+            }
+            fixed.push(what);
+        } else {
+            open.push(what);
+        }
+    }
 
     let managed: BTreeSet<String> = locked.keys().cloned().collect();
     let tracked = project::git_tracked(s, &managed_paths(&managed, &m.targets));
@@ -1460,6 +1734,8 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
         } else {
             open.push(what);
         }
+    } else {
+        passed.push("git index: no managed paths committed".to_string());
     }
 
     let block_file = project::block_file(s);
@@ -1472,8 +1748,11 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
         } else {
             open.push(what);
         }
+    } else {
+        passed.push(format!("{block_file}: managed block up to date"));
     }
 
+    let before = open.len();
     for (n, (p, sk)) in &locked {
         match tree_on_disk(s, n, &[&sk.tree_sha256]) {
             None => open.push(format!("{}: not installed ({}); run `skillcask install`", s.show(&format!("{STORE}/{n}")), p.name)),
@@ -1482,6 +1761,9 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
             }
             Some(_) => {}
         }
+    }
+    if open.len() == before {
+        passed.push(format!("installed: {} skill(s) match skills.lock", locked.len()));
     }
 
     let warnings = shadows(s, &m, locked.keys().chain(&hand).chain(&locals));
@@ -1495,6 +1777,10 @@ pub fn doctor(ctx: &Ctx, fix: bool) -> Result<()> {
             }
         }
     };
+    // An agent pays for every `ok` line in tokens (D19), so only a person sees what passed.
+    if !ui::agent() {
+        section(&passed, "✓", "", ui::Color::Green);
+    }
     section(&open, "✗", "problem", ui::Color::Red);
     section(&fixed, "✓", "fixed", ui::Color::Green);
     section(&warnings, "!", "warning", ui::Color::Yellow);
@@ -1531,6 +1817,212 @@ pub fn search(ctx: &Ctx, query: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `package`: one locked package, else every manifest entry `update` would move. `to`: the newest
+/// version matching it instead, with no cooldown.
+pub fn diff(ctx: &Ctx, package: Option<&str>, to: Option<&str>) -> Result<()> {
+    if to.is_some() && package.is_none() {
+        bail!(MANIFEST, "--to needs a package");
+    }
+    let m = Manifest::load(&ctx.s.config, ctx.s.global)?;
+    let lock = Lock::load(&ctx.s.config)?;
+    let w = deps::wanted(&m, &lock)?;
+    let mut queue: std::collections::VecDeque<SkillReq> = match package {
+        Some(n) => [w
+            .reqs
+            .iter()
+            .find(|r| r.name == n)
+            .cloned()
+            .ok_or_else(|| Error::new(MANIFEST, format!("{n} is not in {} and no locked package requires it", manifest::FILE)))?]
+        .into(),
+        None => w.reqs.iter().filter(|r| m.skill(&r.name).is_some()).cloned().collect(),
+    };
+    let mut seen: BTreeSet<String> = queue.iter().map(|r| r.name.clone()).collect();
+    // The lock as `update` would leave it, to find the dependencies new versions add.
+    let mut after = lock.clone();
+    let mut shown = 0;
+    while let Some(req) = queue.pop_front() {
+        let old = lock.get(&req.name);
+        let named = package == Some(req.name.as_str());
+        let found = match to.filter(|_| named) {
+            Some(v) => ctx.candidate_at(&m, &req, old, v),
+            None => ctx.candidate(&m, &req, old),
+        };
+        let (repo, c) = match found {
+            Ok(x) => x,
+            Err(e) if !named && e.code == MANIFEST => {
+                ui::warn(e.msg);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        if !(named && to.is_some()) && old.is_some_and(|o| !newer(&req, o, &c)) {
+            continue;
+        }
+        let mut prepared = HashMap::new();
+        let new = ctx.lock_candidate(&req, &repo, &c, None, &mut prepared)?;
+        ctx.show_diff(old, &new, &prepared[&new.name], true)?;
+        shown += 1;
+        after.upsert(new);
+        for r in deps::wanted(&m, &after)?.reqs {
+            if after.get(&r.name).is_none() && seen.insert(r.name.clone()) {
+                queue.push_back(r);
+            }
+        }
+    }
+    if shown == 0 {
+        println!("no newer versions within the constraints");
+    }
+    Ok(())
+}
+
+/// A package's skills, versions and registry metadata (`vendor/name[@constraint]` or
+/// `github:owner/repo[@version-or-ref]`), or which package installs a skill (its name).
+pub fn info(ctx: &Ctx, target: &str) -> Result<()> {
+    let m = ctx.manifest_or_default()?;
+    let lock = Lock::load(&ctx.s.config)?;
+    let (spec, gh) = target.strip_prefix("github:").map_or((target, false), |r| (r, true));
+    let (name, at) = spec.split_once('@').map_or((spec, None), |(n, a)| (n, Some(a)));
+    if !gh && !name.contains('/') {
+        return why_skill(ctx, &m, &lock, name);
+    }
+    let name = if gh { name.to_lowercase() } else { name.to_string() };
+    if !manifest::valid_package_name(&name) {
+        bail!(MANIFEST, "{name:?} is not a valid package name (vendor/name, lowercase)");
+    }
+    let existing = m.skill(&name);
+    let gh = gh || existing.is_some_and(|e| e.github.is_some());
+    let locked = lock.get(&name).filter(|_| at.is_none());
+    let (repo, c, versions, abandoned) = if gh {
+        m.check_github(&name)?;
+        let tags = github::tags(ctx.http()?, &name)?;
+        let versions: Vec<String> = tags.iter().map(|t| t.version.clone()).collect();
+        let req = match (at, existing) {
+            (Some(_), _) => SkillReq { name: name.clone(), github: Some(GitHub::Tags), ..Default::default() },
+            (None, Some(e)) => e.clone(),
+            (None, None) if tags.is_empty() => {
+                SkillReq { name: name.clone(), constraint: manifest::DEFAULT_REF.into(), github: Some(GitHub::Ref), ..Default::default() }
+            }
+            (None, None) => SkillReq { name: name.clone(), constraint: "*".into(), github: Some(GitHub::Tags), ..Default::default() },
+        };
+        let (repo, c) = match (at, locked) {
+            (Some(a), _) => ctx.candidate_at(&m, &req, None, a)?,
+            (None, Some(p)) => (github::repository(&name), locked_candidate(p)),
+            (None, None) => ctx.candidate(&m, &req, None)?,
+        };
+        (repo, c, versions, None)
+    } else {
+        let probe = existing.cloned().unwrap_or_else(|| SkillReq { name: name.clone(), ..Default::default() });
+        let (repo, cands) = find(&Registry::new(ctx.http()?), &m, &probe, locked)?;
+        let now = Timestamp::now();
+        let c = match (at, locked) {
+            (Some(a), _) => registry::select(&cands, &name, a, SignedDuration::ZERO, now)?,
+            (None, Some(p)) => match cands.iter().find(|c| c.version == p.version) {
+                Some(c) => Candidate { dist: p.dist.clone(), dist_shasum: None, ..c.clone() },
+                None => locked_candidate(p),
+            },
+            (None, None) => registry::select(&cands, &name, existing.map_or("*", |e| &e.constraint), m.min_release_age(&repo), now)?,
+        };
+        let versions = cands.iter().map(|c| c.version.clone()).collect();
+        (repo, c, versions, cands.first().and_then(|c| c.abandoned.clone()))
+    };
+    let req = SkillReq { name: name.clone(), github: gh.then_some(GitHub::Tags), ..Default::default() };
+    // The locked version's skills are the lock's, whatever its metadata says now.
+    let (pkg, f) = match locked {
+        Some(p) => (p.clone(), ctx.fetch(&name, &p.dist, Some(&p.dist_sha256), None)?.1),
+        None => {
+            let mut prepared = HashMap::new();
+            let pkg = ctx.lock_candidate(&req, &repo, &c, None, &mut prepared)?;
+            let f = prepared.remove(&name).expect("lock_candidate prepares it");
+            warn_invisible(&f, &pkg)?;
+            (pkg, f)
+        }
+    };
+
+    let line = |s: String| println!("{}", skill::shown(&s));
+    let title = format!("{}{name} {}", if gh { "github:" } else { "" }, c.version);
+    line(if locked.is_some() { format!("{title} (locked)") } else { title });
+    if let Some(d) = &c.description {
+        line(format!("description: {d}"));
+    }
+    if !c.license.is_empty() {
+        line(format!("license: {}", c.license.join(", ")));
+    }
+    match abandoned {
+        Some(Some(r)) if manifest::valid_package_name(&r) => line(format!("abandoned: use {r} instead")),
+        Some(_) => line("abandoned: yes".into()),
+        None => {}
+    }
+    const SHOWN: usize = 20;
+    if !versions.is_empty() {
+        let more = if versions.len() > SHOWN { format!(" and {} more", versions.len() - SHOWN) } else { String::new() };
+        line(format!("versions: {}{more}", versions.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(", ")));
+    }
+    if !pkg.requires.is_empty() {
+        line(format!("requires: {}", pkg.requires.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", ")));
+    }
+    line("skills:".into());
+    for sk in &pkg.skills {
+        match skill::frontmatter(&skill_md_of(&f.dir.path().join(&sk.path))).remove("description") {
+            Some(d) => line(format!("  {}: {d}", sk.name)),
+            None => line(format!("  {}", sk.name)),
+        }
+    }
+    for l in why(&m, &deps::wanted(&m, &lock)?, &lock, &name) {
+        line(l);
+    }
+    Ok(())
+}
+
+/// Which package installs skill `name`, and the manifest entries that bring that package in.
+fn why_skill(ctx: &Ctx, m: &Manifest, lock: &Lock, name: &str) -> Result<()> {
+    let line = |s: String| println!("{}", skill::shown(&s));
+    if let Some((p, sk)) = lock.skills().find(|(_, sk)| sk.name == name) {
+        line(match &sk.from {
+            Some(from) => format!("{name}: skill {from} of {} {}, renamed", p.name, p.version),
+            None => format!("{name}: skill of {} {}", p.name, p.version),
+        });
+        for l in why(m, &deps::wanted(m, lock)?, lock, &p.name) {
+            line(l);
+        }
+        return Ok(());
+    }
+    let locals = project::local_names(&ctx.s, &m.local)?;
+    if locals.contains(name) {
+        line(format!("{name}: project skill in {}/{name}", m.local));
+    } else if hand_written(&ctx.s, lock, &project::block_managed(&ctx.s)?, &locals)?.contains(name) {
+        line(format!("{name}: in {}, not installed by skillcask", ctx.s.show(&format!("{STORE}/{name}"))));
+    } else {
+        bail!(MANIFEST, "no installed skill {name:?}; info takes an installed skill name, vendor/name or github:owner/repo");
+    }
+    Ok(())
+}
+
+/// Why `pkg` is locked: its manifest entry, or the packages requiring it, up to their entries.
+fn why(m: &Manifest, w: &deps::Wanted, lock: &Lock, pkg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([pkg.to_string()]);
+    let mut seen = BTreeSet::new();
+    while let Some(n) = queue.pop_front() {
+        if !seen.insert(n.clone()) {
+            continue;
+        }
+        if let Some(r) = m.skill(&n) {
+            out.push(format!("{n}: in {} as {:?}", manifest::FILE, r.constraint));
+        }
+        match w.by.get(&n) {
+            Some(by) => {
+                out.push(format!("{n}: required by {}", by.iter().map(|(r, c)| format!("{r} ({c})")).collect::<Vec<_>>().join(", ")));
+                queue.extend(by.iter().map(|(r, _)| r.clone()));
+            }
+            None if m.skill(&n).is_none() && lock.get(&n).is_some() => {
+                out.push(format!("{n}: in {} only; nothing in {} requires it", crate::lock::FILE, manifest::FILE))
+            }
+            None => {}
+        }
+    }
+    out
 }
 
 /// A report line such as `updated a/b 1.0.0 -> 1.1.0`, its first word as the verb.

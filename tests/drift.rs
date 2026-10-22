@@ -8,15 +8,6 @@ fn multi(s: &Server) {
     s.package("acme/multi", vec![Ver { version: "1.0.0", time: Some(ago(240)), zip, extra: Some(json!(["skills/alpha", "skills/beta"])) }]);
 }
 
-fn gh_commit(sha: &str, hours: i64) -> serde_json::Value {
-    json!({ "sha": sha, "commit": { "committer": { "date": ago(hours) } } })
-}
-
-fn with_github(mut p: Project, s: &Server) -> Project {
-    p.env.push(("SKILLCASK_GITHUB_API".into(), s.base.clone()));
-    p
-}
-
 /// `acme/tagged`: tag 1.0.0 at an old commit, also reachable as ref "1.0.0".
 fn tagged(s: &Server) -> String {
     let sha = "1".repeat(40);

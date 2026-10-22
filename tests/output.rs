@@ -64,6 +64,29 @@ fn doctor_groups_items_and_summarises() {
 }
 
 #[test]
+fn doctor_lists_its_checks_for_a_person() {
+    let s = Server::start();
+    let mut p = installed(&s);
+    let out = p.ok(&["doctor"]);
+    for check in [
+        "  ✓ links: ",
+        "  ✓ git index: no managed paths committed",
+        "  ✓ .gitignore: managed block up to date",
+        "  ✓ installed: 1 skill(s) match skills.lock",
+    ] {
+        assert!(out.contains(check), "{check:?} in {out}");
+    }
+    p.write(".agents/skills/one/SKILL.md", "changed");
+    let out = p.expect(&["doctor"], 1);
+    assert!(out.contains("✗ .agents/skills/one: modified") && !out.contains("✓ installed:"), "{out}");
+    assert!(out.contains("  ✓ links: "), "passed checks still show next to a failed one: {out}");
+
+    p.env.push(("SKILLCASK_AGENT".into(), "1".into()));
+    p.ok(&["install"]);
+    assert_eq!(p.ok(&["doctor"]).trim(), "doctor: no problems found");
+}
+
+#[test]
 fn colour_follows_clicolor_force_and_no_color() {
     let s = Server::start();
     let mut p = Project::new(&s);
@@ -74,6 +97,18 @@ fn colour_follows_clicolor_force_and_no_color() {
     p.env.push(("NO_COLOR".into(), "1".into()));
     let out = p.expect(&["status"], 1);
     assert!(!out.contains('\x1b') && out.contains("error: skills.toml not found\n  hint: run skillcask init"), "{out:?}");
+}
+
+#[test]
+fn an_environment_override_is_warned_about_once_per_run() {
+    let s = Server::start();
+    let mut p = installed(&s);
+    let dir = p.home().join(".config/skillcask");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.toml"), "[policy]\nallow-ranges = false\nenforce = [\"allow-ranges\"]\n").unwrap();
+    p.env.push(("SKILLCASK_ALLOW_RANGES".into(), "true".into()));
+    let out = p.ok(&["status"]);
+    assert_eq!(out.matches("warning: SKILLCASK_ALLOW_RANGES overrides policy.allow-ranges = false enforced by").count(), 1, "{out}");
 }
 
 #[test]

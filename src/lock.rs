@@ -7,7 +7,7 @@ use std::path::Path;
 use jiff::Timestamp;
 use toml_edit::{DocumentMut, Item, TableLike};
 
-use crate::error::{Error, MANIFEST, Result};
+use crate::error::{Context, Error, MANIFEST, Result};
 
 pub const FILE: &str = "skills.lock";
 
@@ -62,7 +62,7 @@ impl Lock {
         match std::fs::read_to_string(root.join(FILE)) {
             Ok(t) => parse(&t),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Lock::default()),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e).ctx(FILE),
         }
     }
 
@@ -128,6 +128,12 @@ impl Lock {
 }
 
 pub fn parse(text: &str) -> Result<Lock> {
+    if text.lines().any(|l| ["<<<<<<<", "=======", ">>>>>>>"].iter().any(|m| l.starts_with(m))) {
+        return Err(bad("unresolved merge conflict").hint(format!(
+            "resolve {} first, keep either side of {FILE} (e.g. git checkout --theirs {FILE}), then run skillcask install; it locks what that side lacks",
+            crate::manifest::FILE
+        )));
+    }
     let doc: DocumentMut = text.parse().map_err(bad)?;
     match doc.get("version").and_then(Item::as_integer) {
         Some(1 | 2) => {}
@@ -147,14 +153,12 @@ pub fn parse(text: &str) -> Result<Lock> {
 }
 
 fn package(t: &dyn TableLike) -> Result<Package> {
-    let s = |t: &dyn TableLike, k: &str| -> Result<String> {
-        t.get(k).and_then(Item::as_str).map(String::from).ok_or_else(|| bad(format!("missing {k}")))
-    };
-    let name = s(t, "name")?;
+    let s = |t: &dyn TableLike, k: &str| t.get(k).and_then(Item::as_str).map(String::from).ok_or_else(|| format!("missing {k}"));
+    let name = s(t, "name").map_err(bad)?;
     if !crate::manifest::valid_package_name(&name) {
         return Err(bad(format!("invalid package name {name:?}")));
     }
-    let ctx = |e: Error| bad(format!("{name}: {}", e.msg.trim_start_matches("skills.lock: ")));
+    let ctx = |e: String| bad(format!("{name}: {e}"));
     let dist = t.get("dist").and_then(Item::as_table_like).ok_or_else(|| bad(format!("{name}: missing dist")))?;
     let released = match t.get("released") {
         None => None,
@@ -289,6 +293,21 @@ mod tests {
     }
 
     #[test]
+    fn dist_type_and_ref_are_checked_and_round_trip() {
+        let ok = sample();
+        let msg = |from: &str, to: &str| parse(&ok.replace(from, to)).unwrap_err().msg;
+        assert_eq!(msg("type = \"zip\"", "type = \"tar\""), "skills.lock: invalid dist type \"tar\" in a/b, only \"zip\"");
+        assert_eq!(msg("type = \"zip\", ", ""), "skills.lock: a/b: missing type");
+        assert_eq!(msg("version = \"1.0.0\"", "ref = \"yes\"\nversion = \"1.0.0\""), "skills.lock: invalid ref in a/b");
+        for (line, git_ref) in [("", None), ("ref = true\n", Some(true)), ("ref = false\n", Some(false))] {
+            let text = ok.replace("version = \"1.0.0\"", &format!("{line}version = \"1.0.0\""));
+            let lock = parse(&text).unwrap();
+            assert_eq!(lock.packages[0].git_ref, git_ref, "{line:?}");
+            assert_eq!(lock.render(), text, "{line:?}");
+        }
+    }
+
+    #[test]
     fn requires_switches_to_version_2() {
         let mut lock = parse(&sample()).unwrap();
         lock.packages[0].requires = BTreeMap::from([("github:o/r/pr".into(), "main".into()), ("acme/x".into(), "^1.0".into())]);
@@ -300,6 +319,17 @@ mod tests {
             let e = parse(&text.replace("\"acme/x\" = \"^1.0\"", bad)).unwrap_err();
             assert!(e.msg.contains("invalid requires in a/b"), "{bad}: {}", e.msg);
         }
+    }
+
+    #[test]
+    fn merge_conflict_markers_fail_with_a_hint() {
+        let ok = sample();
+        let at = ok.find("\n[[package]]").unwrap();
+        let text = format!("{}\n<<<<<<< HEAD\n{}=======\n>>>>>>> other\n", &ok[..at], &ok[at..]);
+        let e = parse(&text).unwrap_err();
+        assert!(e.msg.contains("merge conflict") && e.code == MANIFEST, "{}", e.msg);
+        assert!(e.hint.unwrap().contains("skillcask install"));
+        assert!(parse(&ok.replace("version = 1\n", "version = 1 # <<<<<<< only at line start\n")).is_ok());
     }
 
     fn sample() -> String {
@@ -330,5 +360,19 @@ mod tests {
         }
         let twice = format!("{ok}{}", &ok[ok.find("\n[[package]]").unwrap()..]);
         assert!(parse(&twice).unwrap_err().msg.contains("invalid lock: package a/b appears twice"));
+        // Only a missing lock is empty; one that exists but cannot be read is an error.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Lock::load(dir.path()).unwrap(), Lock::default());
+        std::fs::create_dir(dir.path().join(FILE)).unwrap();
+        assert!(Lock::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn a_missing_field_names_the_package_once() {
+        let e = parse(&sample().replace("version = \"1.0.0\"\n", "")).unwrap_err();
+        assert_eq!((e.code, e.msg.as_str()), (MANIFEST, "skills.lock: a/b: missing version"));
+        let e = parse(&sample().replace("name = \"one\", ", "")).unwrap_err();
+        assert_eq!(e.msg, "skills.lock: a/b: missing name");
+        assert_eq!(parse(&sample().replace("name = \"a/b\"\n", "")).unwrap_err().msg, "skills.lock: missing name");
     }
 }

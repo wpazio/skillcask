@@ -48,6 +48,16 @@ min-release-age = "3d"
 enforce = ["allow-sources"]
 ```
 
+An enforced `min-release-age` also binds the per-repository values of D15 (D28): a project's
+`min-release-age` on a repository may be longer, never shorter (exit 1 naming the repository);
+a repository without one gets the enforced value. `config.toml` lists the exceptions by
+`https://` URL prefix, longest match wins, and only next to `enforce = ["min-release-age"]`:
+
+```toml
+[policy.repository-min-release-age]
+"https://gitlab.example.com/" = "0"   # reviewed in merge requests
+```
+
 Only `[policy]` is read from `config.toml`; any other table is exit 1, so a typo does not
 silently drop a rule. CI without the file applies the project and the environment.
 

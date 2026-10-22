@@ -9,16 +9,30 @@ use ureq::tls::{PemItem, RootCerts, TlsConfig};
 use url::Url;
 
 use crate::bail;
-use crate::error::{AUTH, Error, IO, NETWORK, Result};
+use crate::error::{AUTH, Context, Error, IO, NETWORK, Result};
 
 const MAX_REDIRECTS: usize = 5;
 const JSON_LIMIT: u64 = 50 * 1024 * 1024;
+const ATTEMPTS: u32 = 3;
+/// A longer `Retry-After` (a rate limit window) fails at once instead of stalling the command.
+const MAX_RETRY_AFTER: u64 = 60;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Cred {
     Basic(String, String),
     Bearer(String),
     PrivateToken(String),
+}
+
+/// The variant only: a token, or a username that is one, must not reach a panic or a log.
+impl std::fmt::Debug for Cred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Cred::Basic(..) => "Basic(…)",
+            Cred::Bearer(_) => "Bearer(…)",
+            Cred::PrivateToken(_) => "PrivateToken(…)",
+        })
+    }
 }
 
 impl Cred {
@@ -52,7 +66,7 @@ impl Auth {
             match std::fs::read_to_string(&path) {
                 Ok(text) => auth.add(&text, &path.display().to_string())?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e).ctx(path.display()),
             }
         }
         let token = ["GITHUB_TOKEN", "GH_TOKEN"].iter().find_map(|k| std::env::var(k).ok().filter(|t| !t.is_empty()));
@@ -182,6 +196,33 @@ pub struct Http {
     agent: ureq::Agent,
     auth: Auth,
     verbose: bool,
+    /// First retry delay without `Retry-After`; doubles per retry.
+    backoff: Duration,
+}
+
+/// Failures worth another attempt: the connection broke, not the request. ureq 3 reports TLS
+/// failures (rustls: `InvalidData`) and OS timeouts as I/O errors too; those would fail again (D20).
+fn transient(e: &ureq::Error) -> bool {
+    match e {
+        ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(io) => !matches!(io.kind(), std::io::ErrorKind::InvalidData | std::io::ErrorKind::TimedOut),
+        _ => false,
+    }
+}
+
+/// GitHub's quota is spent until its reset, typically far beyond any retry.
+fn rate_limited<B>(r: &ureq::http::Response<B>) -> bool {
+    r.headers().get("x-ratelimit-remaining").is_some_and(|v| v.as_bytes() == b"0")
+}
+
+/// Wait before retry number `retry` (1-based), or `None` when `Retry-After` asks for longer than
+/// we are willing to wait. Only the delay-seconds form is read; a date falls back to backoff.
+fn retry_delay(retry: u32, retry_after: Option<&str>, backoff: Duration) -> Option<Duration> {
+    match retry_after.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(s) if s > MAX_RETRY_AFTER => None,
+        Some(s) => Some(Duration::from_secs(s)),
+        None => Some(backoff * 2u32.pow(retry - 1)),
+    }
 }
 
 impl Http {
@@ -213,10 +254,10 @@ impl Http {
             .user_agent(concat!("skillcask/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
-        Ok(Http { agent, auth: Auth::load(config)?, verbose })
+        Ok(Http { agent, auth: Auth::load(config)?, verbose, backoff: Duration::from_secs(1) })
     }
 
-    /// `Ok(None)` on 404/410.
+    /// `Ok(None)` on 404/410. Connection failures, 429 and 5xx are retried: every request is a GET.
     pub fn get(&self, url: &str, max_bytes: u64) -> Result<Option<Vec<u8>>> {
         let mut cur = Url::parse(url).map_err(|e| Error::new(NETWORK, format!("invalid URL {:?}: {e}", redact_raw(url))))?;
         for _ in 0..=MAX_REDIRECTS {
@@ -224,19 +265,39 @@ impl Http {
                 bail!(NETWORK, "refusing non-HTTPS URL {}", redact(&cur));
             }
             let shown = redact(&cur);
-            if self.verbose {
-                eprintln!("GET {shown}");
-            }
             let inline =
                 (!cur.username().is_empty()).then(|| Cred::Basic(cur.username().to_string(), cur.password().unwrap_or("").to_string()));
             let _ = cur.set_username("");
             let _ = cur.set_password(None);
-            let mut req = self.agent.get(cur.as_str());
-            if let Some(c) = inline.or_else(|| self.auth.lookup(&cur)) {
-                let (k, v) = c.header();
-                req = req.header(k, v);
-            }
-            let mut resp = req.call().map_err(|e| Error::new(NETWORK, format!("{shown}: {e}")))?;
+            let cred = inline.or_else(|| self.auth.lookup(&cur));
+            let mut retry = 0;
+            let mut resp = loop {
+                if self.verbose {
+                    eprintln!("GET {shown}");
+                }
+                let mut req = self.agent.get(cur.as_str());
+                if let Some(c) = &cred {
+                    let (k, v) = c.header();
+                    req = req.header(k, v);
+                }
+                let (why, after) = match req.call() {
+                    Ok(r) if (r.status() == 429 && !rate_limited(&r)) || r.status().is_server_error() => {
+                        let after = r.headers().get("retry-after").and_then(|v| v.to_str().ok()).map(String::from);
+                        (format!("HTTP {}", r.status().as_u16()), after)
+                    }
+                    Ok(r) => break r,
+                    Err(e) if transient(&e) => (e.to_string(), None),
+                    Err(e) => bail!(NETWORK, "{shown}: {e}"),
+                };
+                retry += 1;
+                let wait = (retry < ATTEMPTS).then(|| retry_delay(retry, after.as_deref(), self.backoff)).flatten();
+                let Some(wait) = wait else {
+                    let after = after.map(|a| format!(" (Retry-After: {})", a.trim())).unwrap_or_default();
+                    bail!(NETWORK, "{shown}: {why}{after}")
+                };
+                crate::ui::warn(format!("{shown}: {why}; retrying in {}s", wait.as_secs()));
+                std::thread::sleep(wait);
+            };
             let status = resp.status().as_u16();
             match status {
                 200..=299 => {
@@ -257,8 +318,8 @@ impl Http {
                     cur = cur.join(loc).map_err(|e| Error::new(NETWORK, format!("{shown}: bad redirect: {e}")))?;
                 }
                 404 | 410 => return Ok(None),
-                403 if resp.headers().get("x-ratelimit-remaining").is_some_and(|v| v.as_bytes() == b"0") => {
-                    bail!(AUTH, "{shown}: HTTP 403: GitHub API rate limit reached; set GITHUB_TOKEN")
+                403 | 429 if rate_limited(&resp) => {
+                    bail!(AUTH, "{shown}: HTTP {status}: GitHub API rate limit reached; set GITHUB_TOKEN")
                 }
                 401 | 403 => bail!(
                     AUTH,
@@ -288,6 +349,26 @@ impl Http {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unreadable_auth_json_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("auth.json")).unwrap();
+        let e = Auth::load(dir.path()).unwrap_err();
+        assert!(e.msg.starts_with(&format!("{}: ", dir.path().join("auth.json").display())), "{}", e.msg);
+    }
+
+    #[test]
+    fn only_broken_connections_are_transient() {
+        use std::io::{Error as IoError, ErrorKind};
+        let io = |e: IoError| transient(&ureq::Error::Io(e));
+        assert!(io(IoError::from(ErrorKind::ConnectionReset)));
+        assert!(io(IoError::new(ErrorKind::UnexpectedEof, "Peer disconnected")));
+        assert!(transient(&ureq::Error::ConnectionFailed));
+        assert!(!io(IoError::new(ErrorKind::InvalidData, rustls::Error::InvalidCertificate(rustls::CertificateError::Expired))));
+        assert!(!io(IoError::from(ErrorKind::TimedOut)));
+        assert!(!transient(&ureq::Error::HostNotFound));
+    }
 
     #[test]
     fn auth_sources_and_host_matching() {
@@ -327,6 +408,17 @@ mod tests {
     }
 
     #[test]
+    fn debug_hides_secrets() {
+        let mut a = Auth::default();
+        a.add(r#"{"http-basic":{"h.example.com":{"username":"ghp_user","password":"s3cret"}},"bearer":{"b.example.com":"tok"}}"#, "x")
+            .unwrap();
+        a.lookup(&Url::parse("https://b.example.com/x").unwrap());
+        let shown = format!("{a:?}");
+        assert!(shown.contains("h.example.com") && shown.contains("Basic(…)") && shown.contains("Bearer(…)"), "{shown}");
+        assert!(!shown.contains("ghp_user") && !shown.contains("s3cret") && !shown.contains("tok\""), "{shown}");
+    }
+
+    #[test]
     fn invalid_url_error_hides_userinfo_and_query() {
         let http = Http::new(Path::new("/nonexistent"), false).unwrap();
         let e = http.get("https://u:secret@bad host/x?token=abc", 10).unwrap_err();
@@ -357,6 +449,44 @@ mod tests {
         let r = redact(&u);
         assert!(!r.contains("secret") && !r.contains("user") && !r.contains("abc"), "{r}");
         assert!(r.starts_with("https://h.example.com/p.json"));
+    }
+
+    #[test]
+    fn retry_delay_backs_off_and_honours_retry_after() {
+        let unit = Duration::from_millis(100);
+        assert_eq!(retry_delay(1, None, unit), Some(unit));
+        assert_eq!(retry_delay(2, None, unit), Some(unit * 2));
+        assert_eq!(retry_delay(1, Some(" 7 "), unit), Some(Duration::from_secs(7)));
+        assert_eq!(retry_delay(1, Some("0"), unit), Some(Duration::ZERO));
+        assert_eq!(retry_delay(1, Some("60"), unit), Some(Duration::from_secs(60)));
+        assert_eq!(retry_delay(1, Some("3600"), unit), None);
+        assert_eq!(retry_delay(2, Some("Wed, 21 Oct 2026 07:28:00 GMT"), unit), Some(unit * 2));
+    }
+
+    #[test]
+    fn retries_a_dropped_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count = accepted.clone();
+        std::thread::spawn(move || {
+            for s in listener.incoming() {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(s);
+            }
+        });
+        let mut http = Http::new(Path::new("/nonexistent"), false).unwrap();
+        http.backoff = Duration::from_millis(1);
+        let e = http.get(&format!("https://127.0.0.1:{port}/packages.json"), 10).unwrap_err();
+        assert_eq!(e.code, NETWORK);
+        let accepted = accepted.load(std::sync::atomic::Ordering::SeqCst);
+        // Windows CI accepted 7 connections for 3 calls; the extra ones come from below this retry
+        // loop, so only the lower bound holds there.
+        if cfg!(windows) {
+            assert!(accepted >= ATTEMPTS, "{accepted}");
+        } else {
+            assert_eq!(accepted, ATTEMPTS);
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod archive;
 mod commands;
 mod credential;
 mod deps;
+mod diff;
 mod error;
 mod github;
 mod http;
@@ -101,9 +102,33 @@ enum Cmd {
         frozen: bool,
     },
     /// Re-resolve within constraints and rewrite skills.lock.
-    Update { packages: Vec<String> },
+    Update {
+        packages: Vec<String>,
+        /// Print a unified diff of each updated or added package's skill files; it does not ask
+        /// for confirmation (review with `skillcask diff` first).
+        #[arg(long)]
+        diff: bool,
+    },
     /// Show newer versions per package.
-    Outdated,
+    Outdated {
+        /// Exit 1 when `update` would lock a newer version within a package's constraint.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Unified diff of skill files from the locked version to the one `update` would lock.
+    Diff {
+        /// One package (also a dependency); default: every entry of skills.toml with a newer version.
+        package: Option<String>,
+        /// Compare with the newest version matching this instead, cooldown not applied.
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// A package's skills, versions, description, license and requirements; for an installed
+    /// skill name, which package and skills.toml entry install it.
+    Info {
+        /// vendor/name[@constraint], github:owner/repo[@version-or-ref], or a skill name
+        target: String,
+    },
     /// Compare skills.toml, skills.lock and installed files; exit 1 on any mismatch.
     Status,
     /// Check links, the gitignore block and installed files.
@@ -134,6 +159,11 @@ enum Cmd {
         out: PathBuf,
         paths: Vec<PathBuf>,
     },
+    /// Check skills against the Agent Skills SKILL.md spec; warn about invisible Unicode.
+    Validate {
+        /// Skill directories, or directories to search for SKILL.md (default: the current one).
+        paths: Vec<PathBuf>,
+    },
     /// Any other command runs `skillcask-<command>` from PATH, like git and cargo plugins.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -161,7 +191,7 @@ fn run(cli: Cli) -> Result<(), Error> {
         unpacked: cli.max_unpacked.unwrap_or(d.unpacked),
         files: cli.max_files.unwrap_or(d.files),
     };
-    if cli.global && matches!(cli.cmd, Cmd::External(_) | Cmd::Publish { .. } | Cmd::Auth(_)) {
+    if cli.global && matches!(cli.cmd, Cmd::External(_) | Cmd::Publish { .. } | Cmd::Auth(_) | Cmd::Validate { .. }) {
         return Err(Error::new(MANIFEST, "--global does not apply to this command"));
     }
     if let Cmd::External(args) = &cli.cmd {
@@ -169,6 +199,9 @@ fn run(cli: Cli) -> Result<(), Error> {
     }
     if let Cmd::Auth(a) = &cli.cmd {
         return auth(a);
+    }
+    if let Cmd::Validate { paths } = &cli.cmd {
+        return publish::validate(paths);
     }
     let scope = if cli.global {
         Scope::global()?
@@ -184,18 +217,21 @@ fn run(cli: Cli) -> Result<(), Error> {
         })
     };
     let interactive = !ci() && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    let ctx = Ctx::new(scope, cli.verbose, limits, interactive);
+    let mut ctx = Ctx::new(scope, cli.verbose, limits, interactive);
+    ctx.read_only = matches!(cli.cmd, Cmd::Info { .. } | Cmd::Diff { .. });
     match cli.cmd {
         Cmd::Init => commands::init(&ctx),
         Cmd::Add { package, repository } => commands::add(&ctx, &package, repository),
         Cmd::Remove { packages } => commands::remove(&ctx, &packages),
         Cmd::Install { frozen } => commands::install(&ctx, frozen || ci()),
-        Cmd::Update { packages } => commands::update(&ctx, &packages),
-        Cmd::Outdated => commands::outdated(&ctx),
+        Cmd::Update { packages, diff } => commands::update(&ctx, &packages, diff),
+        Cmd::Outdated { strict } => commands::outdated(&ctx, strict),
+        Cmd::Diff { package, to } => commands::diff(&ctx, package.as_deref(), to.as_deref()),
+        Cmd::Info { target } => commands::info(&ctx, &target),
         Cmd::Status => commands::status(&ctx),
         Cmd::Doctor { fix } => commands::doctor(&ctx, fix),
         Cmd::Search { query } => commands::search(&ctx, &query),
-        Cmd::External(_) | Cmd::Auth(_) => unreachable!("handled above"),
+        Cmd::External(_) | Cmd::Auth(_) | Cmd::Validate { .. } => unreachable!("handled above"),
         Cmd::Publish { vendor, base_url, dist_url, inline, out, paths } => {
             if vendor.is_empty() {
                 return Err(Error::new(MANIFEST, "--vendor must not be empty"));
