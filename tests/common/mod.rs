@@ -22,6 +22,8 @@ struct State {
     requests: Vec<Request>,
     /// Canned responses by path, with or without the query string.
     responses: HashMap<String, Canned>,
+    /// One-shot responses by path, served in order before anything else.
+    queued: HashMap<String, std::collections::VecDeque<Canned>>,
 }
 
 type Canned = (u16, Vec<(String, String)>, Vec<u8>);
@@ -108,6 +110,12 @@ impl Server {
         self.state.lock().unwrap().responses.insert(path.to_string(), (status, headers, body.into()));
     }
 
+    /// Answers the next request for `path` (without query) once with this response.
+    pub fn respond_once(&self, path: &str, status: u16, headers: &[(&str, &str)], body: impl Into<Vec<u8>>) {
+        let headers = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        self.state.lock().unwrap().queued.entry(path.to_string()).or_default().push_back((status, headers, body.into()));
+    }
+
     pub fn redirect(&self, path: &str, location: &str) {
         self.respond(path, 302, &[("Location", location)], "");
     }
@@ -140,6 +148,8 @@ fn handle(s: &mut (impl Read + Write), st: &Mutex<State>) -> std::io::Result<()>
         let path_only = path.split('?').next().unwrap_or("");
         if st.auth.is_some() && st.auth != auth {
             (401, Vec::new(), Vec::new())
+        } else if let Some(r) = st.queued.get_mut(path_only).and_then(|q| q.pop_front()) {
+            r
         } else if let Some(r) = st.responses.get(&path).or_else(|| st.responses.get(path_only)) {
             r.clone()
         } else if let Some(b) = st.files.get(path_only) {
@@ -269,13 +279,20 @@ impl Project {
         self.expect(&a, code)
     }
 
+    /// Writes the user `config.toml` (D18).
+    pub fn config(&self, text: &str) {
+        let dir = self.home().join(".config/skillcask");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), text).unwrap();
+    }
+
     pub fn global_manifest(&self, server: &Server, skills: &str) {
         let dir = self.home().join(".config/skillcask");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("skills.toml"),
             format!(
-                "[repositories]\nfix = {{ type = \"composer\", url = \"{}\" }}\n\n[skills]\n{skills}\n[policy]\npackagist = false\n",
+                "[repositories]\nfix = {{ type = \"composer\", url = \"{}\" }}\n\n[skills]\n{skills}\n[agents]\ntargets = [\".claude/skills\", \".junie/skills\"]\n\n[policy]\npackagist = false\n",
                 server.url("/packages.json")
             ),
         )
@@ -286,7 +303,7 @@ impl Project {
         self.write(
             "skills.toml",
             &format!(
-                "[repositories]\nfix = {{ type = \"composer\", url = \"{}\" }}\n\n[skills]\n{skills}\n[policy]\npackagist = false\n",
+                "[repositories]\nfix = {{ type = \"composer\", url = \"{}\" }}\n\n[skills]\n{skills}\n[agents]\ntargets = [\".claude/skills\", \".junie/skills\"]\n\n[policy]\npackagist = false\n",
                 server.url("/packages.json")
             ),
         );
@@ -336,6 +353,10 @@ impl Project {
             .env_remove("CLICOLOR_FORCE")
             .env_remove("SKILLCASK_HOME")
             .env_remove("XDG_CONFIG_HOME")
+            // Set by GitHub Actions and by developers; they decide which host gets a token.
+            .env_remove("GITHUB_API_URL")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_TOKEN")
             // HOME holds the only git config, so no system credential helper (Keychain) is asked.
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env_remove("GIT_CONFIG_GLOBAL")

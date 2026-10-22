@@ -1,4 +1,5 @@
-//! `skillcask publish`: a static Composer repository from every versioned SKILL.md in a monorepo.
+//! `skillcask publish`: a static Composer repository from every versioned SKILL.md in a monorepo,
+//! and `skillcask validate`, which checks the same SKILL.md files against the Agent Skills spec.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -32,6 +33,7 @@ struct Found {
     version: String,
     normalized: Version,
     description: Option<String>,
+    abandoned: Option<Value>,
     zip: Vec<u8>,
     files: Vec<FileEntry>,
 }
@@ -58,7 +60,7 @@ pub fn publish(args: &PublishArgs) -> Result<()> {
     let roots = if args.paths.is_empty() { vec![PathBuf::from(".")] } else { args.paths.clone() };
     let mut dirs = Vec::new();
     for r in &roots {
-        find(r, &out, &mut dirs)?;
+        find(r, Some(&out), &mut dirs)?;
     }
 
     let mut found: BTreeMap<String, Vec<Found>> = BTreeMap::new();
@@ -66,7 +68,15 @@ pub fn publish(args: &PublishArgs) -> Result<()> {
     for dir in dirs {
         let text = std::fs::read_to_string(dir.join(SKILL_MD))?;
         let fm = frontmatter(&text);
-        let (Some(name), Some(version)) = (fm.get("name"), fm.get("version")) else { continue };
+        let (Some(name), Some(version)) = (fm.get("name"), fm.get("version")) else {
+            let missing = match (fm.contains_key("name"), fm.contains_key("version")) {
+                (false, false) => "no name and no version",
+                (false, true) => "no name",
+                _ => "no version",
+            };
+            crate::ui::warn(format!("skipping {}/{SKILL_MD}: {missing} in the frontmatter", shown(&dir)));
+            continue;
+        };
         let at = dir.display();
         // Fails in the skill's own CI rather than at every consumer.
         for (k, v) in crate::skill::requires(&text).map_err(|e| Error::new(MANIFEST, format!("{at}: {e}")))? {
@@ -88,6 +98,12 @@ pub fn publish(args: &PublishArgs) -> Result<()> {
         if *first != dir {
             bail!(MANIFEST, "{package} is defined in both {} and {at}; set `package:` in one SKILL.md", first.display());
         }
+        let abandoned = match fm.get("deprecated").map(String::as_str) {
+            None | Some("false") => None,
+            Some("true") => Some(Value::Bool(true)),
+            Some(r) if valid_package_name(r) => Some(r.into()),
+            Some(r) => bail!(MANIFEST, "{at}: deprecated: {r:?} must be true, false or the replacement package (vendor/name)"),
+        };
         let versions = found.entry(package.clone()).or_default();
         let (zip, files) = crate::archive::zip_dir(&dir).ctx(&at)?;
         versions.push(Found {
@@ -97,6 +113,7 @@ pub fn publish(args: &PublishArgs) -> Result<()> {
             version: version.clone(),
             normalized,
             description: fm.get("description").cloned(),
+            abandoned,
         });
     }
 
@@ -194,6 +211,9 @@ pub fn publish(args: &PublishArgs) -> Result<()> {
                     if let Some(d) = f.description {
                         m["description"] = d.into();
                     }
+                    if let Some(a) = f.abandoned {
+                        m["abandoned"] = a;
+                    }
                     meta.push(m);
                     ("published", Some(f.zip))
                 }
@@ -265,8 +285,65 @@ fn zip_0_1_2(path: &Path, shasum: &str, dir: &Path) -> Option<Vec<u8>> {
     hex::encode(Sha1::digest(&zip)).eq_ignore_ascii_case(shasum).then_some(zip)
 }
 
-fn find(dir: &Path, out: &Path, found: &mut Vec<PathBuf>) -> Result<()> {
-    if dir.canonicalize().is_ok_and(|c| c == out) {
+/// `skillcask validate`: every skill under `paths` (default `.`) against the Agent Skills spec and
+/// what `publish` requires of `requires:`; invisible Unicode in its files is a warning.
+pub fn validate(paths: &[PathBuf]) -> Result<()> {
+    let roots = if paths.is_empty() { vec![PathBuf::from(".")] } else { paths.to_vec() };
+    let mut dirs = Vec::new();
+    for r in &roots {
+        let before = dirs.len();
+        find(r, None, &mut dirs).ctx(shown(r))?;
+        if dirs.len() == before {
+            bail!(MANIFEST, "no {SKILL_MD} under {}", shown(r));
+        }
+    }
+    let mut invalid = 0;
+    for dir in &dirs {
+        let at = shown(dir);
+        let mut problems = Vec::new();
+        let text = std::fs::read_to_string(dir.join(SKILL_MD)).ctx(format!("{at}/{SKILL_MD}"))?;
+        let dir_name = dir.canonicalize()?.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        problems.extend(crate::skill::spec_problems(&text, &dir_name));
+        match crate::skill::requires(&text) {
+            Ok(r) => problems.extend(r.iter().filter_map(|(k, v)| crate::deps::check(k, v).err().map(|e| format!("requires: {e}")))),
+            Err(e) => problems.push(e),
+        }
+        match crate::skill::scan_publish(dir) {
+            Ok(files) => {
+                for f in files {
+                    let path = format!("{at}/{}", f.path);
+                    let bytes = std::fs::read(dir.join(&f.path)).unwrap_or_default();
+                    crate::skill::invisible_warnings(&path, &bytes).into_iter().for_each(crate::ui::warn);
+                }
+            }
+            Err(e) => problems.push(e.msg),
+        }
+        for p in &problems {
+            crate::ui::error(format!("{at}: {p}"), None);
+        }
+        invalid += usize::from(!problems.is_empty());
+    }
+    let n = dirs.len();
+    let skills = if n == 1 { "skill" } else { "skills" };
+    if invalid > 0 {
+        bail!(MANIFEST, "{invalid} of {n} {skills} are invalid");
+    }
+    if !crate::ui::agent() {
+        crate::ui::done("checked", format!("{n} {skills}"));
+    }
+    Ok(())
+}
+
+/// A path for messages: without a leading `./`, with `/` on Windows too.
+fn shown(p: &Path) -> String {
+    let p = p.strip_prefix(".").ok().filter(|r| !r.as_os_str().is_empty()).unwrap_or(p);
+    let s = p.display().to_string();
+    if cfg!(windows) { s.replace('\\', "/") } else { s }
+}
+
+/// Skill directories under `dir`; `out` (the publish output) is not searched.
+fn find(dir: &Path, out: Option<&Path>, found: &mut Vec<PathBuf>) -> Result<()> {
+    if out.is_some_and(|out| dir.canonicalize().is_ok_and(|c| c == out)) {
         return Ok(());
     }
     if dir.join(SKILL_MD).is_file() {
@@ -485,6 +562,28 @@ mod tests {
         publish(&args(src.path(), out.path())).unwrap();
         let p2: Value = serde_json::from_slice(&std::fs::read(out.path().join("p2/acme/alpha.json")).unwrap()).unwrap();
         assert_eq!(p2["packages"]["acme/alpha"][0]["description"], "Reviews code");
+    }
+
+    #[test]
+    fn maps_deprecated_to_abandoned() {
+        let src = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let publish_with = |version: &str, deprecated: &str| {
+            std::fs::write(src.path().join(SKILL_MD), format!("---\nname: alpha\nversion: {version}\n{deprecated}---\n")).unwrap();
+            publish(&args(src.path(), out.path()))
+        };
+        let abandoned = |i: usize| {
+            let p2: Value = serde_json::from_slice(&std::fs::read(out.path().join("p2/acme/alpha.json")).unwrap()).unwrap();
+            p2["packages"]["acme/alpha"][i].get("abandoned").cloned()
+        };
+        publish_with("1.0.0", "deprecated: false\n").unwrap();
+        assert_eq!(abandoned(0), None);
+        publish_with("1.1.0", "deprecated: true\n").unwrap();
+        assert_eq!(abandoned(0), Some(json!(true)));
+        publish_with("1.2.0", "deprecated: \"acme/beta\"\n").unwrap();
+        assert_eq!((abandoned(0), abandoned(1)), (Some(json!("acme/beta")), Some(json!(true))));
+        let e = publish_with("1.3.0", "deprecated: use beta\n").unwrap_err().msg;
+        assert!(e.contains("deprecated"), "{e}");
     }
 
     #[test]

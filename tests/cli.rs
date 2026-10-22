@@ -36,16 +36,16 @@ fn add_creates_everything_and_frozen_clone_reproduces_it() {
     let lock = p.read("skills.lock");
     assert!(lock.contains("version = \"v1.2.3\"") && lock.contains("tree-sha256") && lock.contains("reference = \"ref0\""), "{lock}");
     assert_eq!(p.read(".agents/skills/one/SKILL.md"), skill_md("one"));
-    for t in [".claude/skills/one", ".junie/skills/one"] {
-        let meta = std::fs::symlink_metadata(p.path().join(t)).unwrap();
-        if cfg!(unix) {
-            assert!(meta.file_type().is_symlink(), "{t}");
-            assert_eq!(std::fs::read_link(p.path().join(t)).unwrap(), std::path::Path::new("../../.agents/skills/one"));
-        }
-        assert_eq!(p.read(&format!("{t}/SKILL.md")), skill_md("one"));
+    assert!(!p.exists(".junie"), "the default targets are [\"claude\"] (D29)");
+    let t = ".claude/skills/one";
+    let meta = std::fs::symlink_metadata(p.path().join(t)).unwrap();
+    if cfg!(unix) {
+        assert!(meta.file_type().is_symlink(), "{t}");
+        assert_eq!(std::fs::read_link(p.path().join(t)).unwrap(), std::path::Path::new("../../.agents/skills/one"));
     }
+    assert_eq!(p.read(&format!("{t}/SKILL.md")), skill_md("one"));
     let gi = p.read(".gitignore");
-    assert!(gi.contains("/.agents/skills/one/") && gi.contains("/.claude/skills/one") && gi.contains("/.junie/skills/one"), "{gi}");
+    assert!(gi.contains("/.agents/skills/one/") && gi.contains("/.claude/skills/one"), "{gi}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -856,7 +856,7 @@ fn global_targets_may_be_named_like_the_project_local_dir() {
     p.global_manifest(&s, "");
     let cfg = p.home().join(".config/skillcask/skills.toml");
     let text = std::fs::read_to_string(&cfg).unwrap();
-    std::fs::write(&cfg, format!("{text}\n[agents]\ntargets = [\".skills\"]\n")).unwrap();
+    std::fs::write(&cfg, text.replace("targets = [\".claude/skills\", \".junie/skills\"]", "targets = [\"./.skills\"]")).unwrap();
     p.global(&["add", "acme/one"], 0);
     assert!(p.home().join(".skills/one/SKILL.md").is_file());
     p.global(&["remove", "acme/one"], 0);

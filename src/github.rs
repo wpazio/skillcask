@@ -27,6 +27,38 @@ pub fn api() -> String {
     std::env::var("SKILLCASK_GITHUB_API").ok().filter(|v| !v.is_empty()).unwrap_or_else(set).trim_end_matches('/').to_string()
 }
 
+/// API bases the user or the CI runner chose, never a project: `api.github.com`,
+/// `SKILLCASK_GITHUB_API` and GitHub Actions' `GITHUB_API_URL`. Only these get `GITHUB_TOKEN`, and
+/// only these are `"github"` in an `allow-sources` a project cannot change (D30).
+pub fn trusted_apis() -> Vec<String> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| v.trim_end_matches('/').to_string());
+    let mut apis = vec![API.to_string()];
+    for api in ["SKILLCASK_GITHUB_API", "GITHUB_API_URL"].into_iter().filter_map(var) {
+        if !apis.contains(&api) {
+            apis.push(api);
+        }
+    }
+    apis
+}
+
+/// `url` is on the host of a trusted API, keyed as `GITHUB_TOKEN` is: scheme, host and port.
+pub fn on_trusted_host(url: &url::Url) -> bool {
+    trusted_apis().iter().filter_map(|a| url::Url::parse(a).ok()).any(|a| a.origin() == url.origin())
+}
+
+/// How to authenticate to the API in use: `GITHUB_TOKEN` reaches trusted hosts only.
+pub fn token_hint() -> String {
+    let Ok(u) = url::Url::parse(&api()) else { return "GITHUB_TOKEN".into() };
+    if on_trusted_host(&u) {
+        return "GITHUB_TOKEN".into();
+    }
+    let host = u.host_str().unwrap_or_default();
+    format!(
+        "a token for {host} (`skillcask auth set {} --username oauth2`, or github-oauth in auth.json)",
+        u.origin().ascii_serialization()
+    )
+}
+
 /// A run reads one manifest, so the first one sets the API base.
 pub fn set_api(url: &str) {
     let _ = CONFIGURED.set(url.to_string());
@@ -44,7 +76,7 @@ fn get(http: &Http, name: &str, path: &str) -> Result<Value> {
     let url = format!("{}{path}", repository(name).url);
     http.get_json(&url)?.ok_or_else(|| {
         // GitHub answers 404, not 401, for a private repository read without a token.
-        let hint = if http.has_credential(&url) { "" } else { "; private repositories need GITHUB_TOKEN" };
+        let hint = if http.has_credential(&url) { String::new() } else { format!("; private repositories need {}", token_hint()) };
         Error::new(MANIFEST, format!("GitHub: {name}: {path:?} not found (no such repository, ref or tag?{hint})"))
     })
 }
@@ -72,6 +104,9 @@ fn candidate(name: &str, version: String, parsed: Version, sha: &str, time: Opti
         dist_shasum: None,
         // Empty: the skills are discovered in the archive.
         skill_paths: Vec::new(),
+        abandoned: None,
+        description: None,
+        license: Vec::new(),
     }
 }
 

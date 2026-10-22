@@ -186,6 +186,119 @@ pub fn valid_name(n: &str) -> bool {
         && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// Problems with a SKILL.md under the Agent Skills specification (agentskills.io) for a skill in
+/// the directory `dir_name`. Stricter than `valid_name`, which still installs names such as `a--b`.
+pub fn spec_problems(text: &str, dir_name: &str) -> Vec<String> {
+    let body = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if fields(&body.split_inclusive('\n').collect::<Vec<_>>()).is_none() {
+        return vec![format!("{SKILL_MD} has no frontmatter (--- ... ---)")];
+    }
+    let fm = frontmatter(text);
+    let mut out = Vec::new();
+    match fm.get("name") {
+        None => out.push("name is required".into()),
+        Some(n) if n.len() > 64 || !valid_name(n) || n.ends_with('-') || n.contains("--") => {
+            out.push(format!("name {n:?} must be 1-64 lowercase letters, digits and single hyphens, not starting or ending with a hyphen"))
+        }
+        Some(n) if n != dir_name => out.push(format!("name {n:?} does not match the directory name {dir_name:?}")),
+        Some(_) => {}
+    }
+    let mut length = |key: &str, max: usize, required: bool| match fm.get(key).map(|v| v.chars().count()) {
+        None if required => out.push(format!("{key} is required")),
+        Some(n) if n > max => out.push(format!("{key} has {n} characters, at most {max}")),
+        _ => {}
+    };
+    length("description", 1024, true);
+    length("compatibility", 500, false);
+    out
+}
+
+/// Most invisible characters reported per file; the rest are counted.
+const INVISIBLE_SHOWN: usize = 5;
+
+/// An invisible or reordering character: the agent reads text a reviewer does not see.
+#[derive(Debug, PartialEq)]
+pub struct Invisible {
+    /// 1-based.
+    pub line: usize,
+    pub ch: char,
+    pub name: &'static str,
+}
+
+fn invisible_name(c: char) -> Option<&'static str> {
+    Some(match c {
+        '\u{061C}' => "ARABIC LETTER MARK",
+        '\u{200B}' => "ZERO WIDTH SPACE",
+        '\u{200C}' => "ZERO WIDTH NON-JOINER",
+        '\u{200D}' => "ZERO WIDTH JOINER",
+        '\u{200E}' => "LEFT-TO-RIGHT MARK",
+        '\u{200F}' => "RIGHT-TO-LEFT MARK",
+        '\u{202A}' => "LEFT-TO-RIGHT EMBEDDING",
+        '\u{202B}' => "RIGHT-TO-LEFT EMBEDDING",
+        '\u{202C}' => "POP DIRECTIONAL FORMATTING",
+        '\u{202D}' => "LEFT-TO-RIGHT OVERRIDE",
+        '\u{202E}' => "RIGHT-TO-LEFT OVERRIDE",
+        '\u{2060}' => "WORD JOINER",
+        '\u{2066}' => "LEFT-TO-RIGHT ISOLATE",
+        '\u{2067}' => "RIGHT-TO-LEFT ISOLATE",
+        '\u{2068}' => "FIRST STRONG ISOLATE",
+        '\u{2069}' => "POP DIRECTIONAL ISOLATE",
+        '\u{FEFF}' => "ZERO WIDTH NO-BREAK SPACE",
+        '\u{E0001}' => "LANGUAGE TAG",
+        '\u{E007F}' => "CANCEL TAG",
+        '\u{E0000}'..='\u{E007E}' => "TAG CHARACTER",
+        _ => return None,
+    })
+}
+
+/// Bidi controls, zero-width characters and Unicode tags in `text`, except a leading byte order
+/// mark and a zero width joiner between two emoji (`👩‍💻`).
+pub fn invisible(text: &str) -> Vec<Invisible> {
+    let emoji = |c: Option<char>| c.is_some_and(|c| matches!(c, '\u{2600}'..='\u{27BF}' | '\u{FE0F}' | '\u{1F000}'..='\u{1FAFF}'));
+    let mut out = Vec::new();
+    let mut line = 1;
+    let mut prev = None;
+    let mut chars = text.strip_prefix('\u{feff}').unwrap_or(text).chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\n' {
+            line += 1;
+        } else if let Some(name) = invisible_name(c)
+            && !(c == '\u{200D}' && emoji(prev) && emoji(chars.peek().copied()))
+        {
+            out.push(Invisible { line, ch: c, name });
+        }
+        prev = Some(c);
+    }
+    out
+}
+
+/// `<path>:<line>: U+XXXX NAME` per invisible character in a file's `bytes`, a few per file, then
+/// a count of the rest. Not UTF-8 means binary: nothing.
+pub fn invisible_warnings(path: &str, bytes: &[u8]) -> Vec<String> {
+    let Ok(text) = std::str::from_utf8(bytes) else { return Vec::new() };
+    let found = invisible(text);
+    let mut out: Vec<String> =
+        found.iter().take(INVISIBLE_SHOWN).map(|i| format!("{}:{}: U+{:04X} {}", shown(path), i.line, u32::from(i.ch), i.name)).collect();
+    if found.len() > INVISIBLE_SHOWN {
+        out.push(format!("{}: {} more invisible characters", shown(path), found.len() - INVISIBLE_SHOWN));
+    }
+    out
+}
+
+/// Package text for the terminal: control characters (except tab) and the characters `invisible`
+/// reports become `<U+XXXX>`, so they are seen instead of moving the cursor or reordering the line.
+pub fn shown(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if (c.is_control() && c != '\t') || invisible_name(c).is_some() {
+            out.push_str(&format!("<U+{:04X}>", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileEntry {
     /// Relative, `/`-separated.
@@ -364,6 +477,48 @@ mod tests {
             frontmatter("---\ndescription: Reviews code\n  for bugs # c\n\n  and style\nname:\n  one\nmeta:\n  a: b\nlist:\n  - x\n---\n");
         assert_eq!((f["description"].as_str(), f["name"].as_str()), ("Reviews code for bugs and style", "one"));
         assert!(!f.contains_key("meta") && !f.contains_key("list"));
+    }
+
+    #[test]
+    fn finds_invisible_characters() {
+        let found = |t: &str| invisible(t).into_iter().map(|i| (i.line, u32::from(i.ch))).collect::<Vec<_>>();
+        assert_eq!(found("a\r\nb\u{202E}c\r\n\u{200B}"), [(2, 0x202E), (3, 0x200B)], "CRLF counts one line");
+        assert_eq!(found("\u{feff}x\u{feff}"), [(1, 0xFEFF)], "only a leading BOM is fine");
+        assert_eq!(found("\u{1F469}\u{200D}\u{1F4BB} \u{2764}\u{FE0F}\u{200D}\u{1F525}"), [], "emoji ZWJ sequences");
+        assert_eq!(found("a\u{200D}b \u{1F469}\u{200D}"), [(1, 0x200D), (1, 0x200D)]);
+        assert_eq!(found("\u{E0001}\u{E0041}\u{E007F}\u{E0080}"), [(1, 0xE0001), (1, 0xE0041), (1, 0xE007F)]);
+        for c in ['\u{061C}', '\u{200C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202D}', '\u{2060}', '\u{2066}', '\u{2069}'] {
+            assert_eq!(found(&c.to_string()).len(), 1, "{c:?}");
+        }
+        assert!(found("zażółć ‘quotes’ — dash\t\u{00A0}").is_empty());
+
+        assert_eq!(invisible_warnings("s/SKILL.md", "x\n\u{202E}".as_bytes()), ["s/SKILL.md:2: U+202E RIGHT-TO-LEFT OVERRIDE"]);
+        assert!(invisible_warnings("a.bin", b"\xe2\x80\xae\xff").is_empty(), "binary files are skipped");
+        assert_eq!(invisible_warnings("a\u{202E}b.md", "\u{200B}".as_bytes()), ["a<U+202E>b.md:1: U+200B ZERO WIDTH SPACE"]);
+        assert_eq!(shown("x\u{1b}]0;t\u{7}\ty\u{E0041}"), "x<U+001B>]0;t<U+0007>\ty<U+E0041>");
+        let w = invisible_warnings("f", "\u{200B}".repeat(8).as_bytes());
+        assert_eq!((w.len(), w[5].as_str()), (6, "f: 3 more invisible characters"));
+    }
+
+    #[test]
+    fn checks_the_agent_skills_spec() {
+        let md = |fm: &str| format!("---\n{fm}---\nbody\n");
+        assert!(spec_problems(&md("name: a-1\ndescription: d\ncompatibility: git\n"), "a-1").is_empty());
+        assert!(spec_problems(&format!("\u{feff}{}", md("name: a\ndescription: d\n")), "a").is_empty());
+        assert_eq!(spec_problems("# none", "a"), ["SKILL.md has no frontmatter (--- ... ---)"]);
+        assert_eq!(spec_problems(&md("x: y\n"), "a"), ["name is required", "description is required"]);
+        for bad in ["A", "-a", "a-", "a--b", "a_b", &"a".repeat(65)] {
+            let p = spec_problems(&md(&format!("name: {bad}\ndescription: d\n")), bad);
+            assert!(p.len() == 1 && p[0].contains("must be 1-64"), "{bad}: {p:?}");
+        }
+        assert!(spec_problems(&md(&format!("name: {}\ndescription: d\n", "a".repeat(64))), &"a".repeat(64)).is_empty());
+        assert_eq!(spec_problems(&md("name: a\ndescription: d\n"), "b"), ["name \"a\" does not match the directory name \"b\""]);
+        let long = md(&format!("name: a\ndescription: {}\ncompatibility: {}\n", "ł".repeat(1025), "c".repeat(501)));
+        assert_eq!(
+            spec_problems(&long, "a"),
+            ["description has 1025 characters, at most 1024", "compatibility has 501 characters, at most 500"]
+        );
+        assert!(spec_problems(&md(&format!("name: a\ndescription: {}\n", "ł".repeat(1024))), "a").is_empty(), "characters, not bytes");
     }
 
     #[test]

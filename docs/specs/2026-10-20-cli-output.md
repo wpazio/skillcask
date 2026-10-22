@@ -25,8 +25,9 @@ which echoes nothing, so a user cannot tell whether the paste arrived.
   `error: the home directory is the global scope` / `  hint: run skillcask --global install`.
 - `status` for a person: the table with coloured states and a summary line. For an agent: rows
   with a problem only, fields separated by tabs, then one summary line.
-- `doctor` for a person: problems (`✗`), repairs (`✓`) and warnings (`!`) grouped, then a summary.
-  For an agent: one line per item without symbols.
+- `doctor` for a person: the checks that passed (`✓ links: 12 ok`), then problems (`✗`), repairs
+  (`✓`) and warnings (`!`) grouped, then a summary. For an agent: problems, repairs and warnings
+  only, one line per item without symbols.
 - `outdated` and other tables: aligned columns for a person, tab-separated for an agent.
 - `auth set` confirms what it received: `stored a 53-character token for <host> with git's
   credential helper (osxkeychain)`. Only the length, never any character of the token.

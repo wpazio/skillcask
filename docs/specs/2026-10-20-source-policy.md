@@ -48,6 +48,16 @@ min-release-age = "3d"
 enforce = ["allow-sources"]
 ```
 
+An enforced `min-release-age` also binds the per-repository values of D15 (D28): a project's
+`min-release-age` on a repository may be longer, never shorter (exit 1 naming the repository);
+a repository without one gets the enforced value. `config.toml` lists the exceptions by
+`https://` URL prefix, longest match wins, and only next to `enforce = ["min-release-age"]`:
+
+```toml
+[policy.repository-min-release-age]
+"https://gitlab.example.com/" = "0"   # reviewed in merge requests
+```
+
 Only `[policy]` is read from `config.toml`; any other table is exit 1, so a typo does not
 silently drop a rule. CI without the file applies the project and the environment.
 
@@ -56,9 +66,13 @@ silently drop a rule. CI without the file applies the project and the environmen
 Absent: every source is allowed. Each entry is one of:
 
 - `packagist`: `https://repo.packagist.org`;
-- `github`: the GitHub API in use (`<api>/repos/…`);
+- `github`: the GitHub API in use (`<api>/repos/…`). From the environment or an enforced key it
+  means `<api>/repos/` of the APIs the user or the CI runner names only (D30), so a project's
+  `github` url cannot widen it;
 - an `https://` URL prefix, matched on a `/` boundary (`https://api.github.com/repos/acme/`
-  allows the GitHub organisation `acme` only);
+  allows the GitHub organisation `acme` only). Both sides are compared as parsed URLs, so no
+  spelling of `..` leaves the prefix; below it a `..` behind `%2F` or `%5C` is refused too. An
+  entry that does not parse as a URL is an error;
 - in `skills.toml` only: a repository name from `[repositories]`, matching its URL. In
   `config.toml` and the environment a name would mean whatever a project calls that name, so
   only the forms above are accepted.
@@ -100,8 +114,9 @@ with its layer: `allow-sources = ["acme"] (config.toml, enforced)`.
 ## Testing
 
 - Unit: layer precedence for each layer, enforce conflict, env parsing, URL prefix boundary
-  (`https://git.example.com` does not allow `https://git.example.com.evil/`), names refused in
-  `config.toml`, Packagist ordered last, `github = false`.
+  (`https://git.example.com` does not allow `https://git.example.com.evil/`, `<prefix>/../other/`
+  or `<prefix>/..%2Fother/`), names refused in `config.toml`, Packagist ordered last,
+  `github = false`.
 - Integration: allow-sources limited to a private repository blocks a Packagist-only package
   without a request to it; a lock entry from a blocked source fails `install --frozen`; an
   enforced key in `config.toml` beats the project and the environment beats both; a dependency

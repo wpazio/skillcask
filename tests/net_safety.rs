@@ -95,6 +95,42 @@ fn github_token_goes_to_the_api_host_only() {
 }
 
 #[test]
+fn github_token_never_follows_a_github_url_from_the_manifest() {
+    let gh = Server::start();
+    let sha = "1".repeat(40);
+    gh.put("/repos/acme/t/tags", json!([{ "name": "v1.0.0", "commit": { "sha": sha } }]).to_string());
+    gh.put(&format!("/repos/acme/t/commits/{sha}"), gh_commit(&sha, 240).to_string());
+    gh.put(&format!("/repos/acme/t/zipball/{sha}"), zipball(&[("SKILL.md", &skill_md("t"))]));
+    let mut p = Project::new(&gh);
+    p.env.push(("GITHUB_TOKEN".into(), "ght0ken".into()));
+    p.write("skills.toml", &format!("[repositories]\npackagist = false\ngithub = {{ type = \"github\", url = \"{}\" }}\n", gh.base));
+    p.ok(&["add", "github:acme/t"]);
+    assert!(!gh.log().is_empty() && gh.log().iter().all(|l| l.ends_with("auth=false")), "{:?}", gh.log());
+    let e = p.expect(&["add", "github:acme/private"], 1);
+    assert!(e.contains("skillcask auth set") && !e.contains("GITHUB_TOKEN"), "{e}");
+
+    // GitHub Actions names its API (GitHub Enterprise on a GHE runner); that host gets the token.
+    std::fs::remove_file(p.path().join("skills.lock")).unwrap();
+    p.env.push(("GITHUB_API_URL".into(), gh.base.clone()));
+    p.ok(&["update"]);
+    assert!(gh.log().iter().any(|l| l.ends_with("auth=true")), "{:?}", gh.log());
+}
+
+#[test]
+fn an_enforced_github_source_is_not_widened_by_the_manifest() {
+    let gh = Server::start();
+    let mut p = Project::new(&gh);
+    p.config("[policy]\nallow-sources = [\"github\"]\nenforce = [\"allow-sources\"]\n");
+    p.write("skills.toml", &format!("[repositories]\npackagist = false\ngithub = {{ type = \"github\", url = \"{}\" }}\n", gh.base));
+    // GitHub Actions names the same API as the default: listed once.
+    p.env.push(("GITHUB_API_URL".into(), "https://api.github.com/".into()));
+    let e = p.expect(&["add", "github:acme/t"], 1);
+    assert!(e.contains("not in policy.allow-sources") && e.contains("\"github\" covers https://api.github.com only"), "{e}");
+    assert!(e.contains("SKILLCASK_GITHUB_API names one more"), "{e}");
+    assert!(gh.log().is_empty(), "{:?}", gh.log());
+}
+
+#[test]
 fn github_rate_limit_is_named() {
     let s = Server::start();
     s.respond("/repos/acme/x/tags", 403, &[("x-ratelimit-remaining", "0")], "");

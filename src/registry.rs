@@ -25,6 +25,10 @@ pub struct Candidate {
     pub dist: Dist,
     pub dist_shasum: Option<String>,
     pub skill_paths: Vec<String>,
+    /// Composer `abandoned`: `Some(replacement)` when set.
+    pub abandoned: Option<Option<String>>,
+    pub description: Option<String>,
+    pub license: Vec<String>,
 }
 
 const SEARCH_LIMIT: usize = 30;
@@ -176,6 +180,17 @@ fn candidates(package: &str, versions: Vec<Map<String, Value>>, base: &Url) -> V
             dist_shasum: s(&m, &["dist", "shasum"]),
             skill_paths,
             version,
+            abandoned: match m.get("abandoned") {
+                Some(Value::Bool(true)) => Some(None),
+                Some(Value::String(r)) => Some(Some(r.clone()).filter(|r| !r.is_empty())),
+                _ => None,
+            },
+            description: s(&m, &["description"]),
+            license: match m.get("license") {
+                Some(Value::String(l)) => vec![l.clone()],
+                Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(String::from).collect(),
+                _ => Vec::new(),
+            },
         });
     }
     out.sort_by(|a, b| b.parsed.cmp(&a.parsed));
@@ -359,6 +374,19 @@ pub fn select(cands: &[Candidate], name: &str, constraint: &str, min_age: Signed
     }
 }
 
+/// Composer marks the whole package, so the newest version's metadata decides.
+pub fn warn_abandoned(cands: &[Candidate]) {
+    let Some(c) = cands.first() else { return };
+    match &c.abandoned {
+        // The replacement is registry text: printed only when it cannot carry escapes or lines.
+        Some(Some(r)) if crate::manifest::valid_package_name(r) => {
+            crate::ui::warn(crate::skill::shown(&format!("{} is abandoned; use {r} instead", c.name)))
+        }
+        Some(_) => crate::ui::warn(crate::skill::shown(&format!("{} is abandoned", c.name))),
+        None => {}
+    }
+}
+
 pub fn newest<'c>(cands: &'c [Candidate], constraint: Option<&Constraint>) -> Option<&'c Candidate> {
     cands
         .iter()
@@ -409,6 +437,20 @@ mod tests {
         assert_eq!(c[2].time, None);
         let plain = expand(&[json!({"version": "1"}), json!({"x": 1})], false);
         assert!(plain[1].get("version").is_none());
+    }
+
+    #[test]
+    fn reads_abandoned() {
+        let base = Url::parse("https://repo.example.com/p2/acme/x.json").unwrap();
+        let with = |a: Value| {
+            let v = json!({"version": "1.0.0", "type": "ai-agent-skill", "dist": {"type": "zip", "url": "/x.zip"}, "abandoned": a});
+            candidates("acme/x", vec![v.as_object().unwrap().clone()], &base).remove(0).abandoned
+        };
+        assert_eq!(with(json!(true)), Some(None));
+        assert_eq!(with(json!("acme/y")), Some(Some("acme/y".into())));
+        assert_eq!(with(json!("")), Some(None));
+        assert_eq!(with(json!(false)), None);
+        assert_eq!(cands()[0].abandoned, None);
     }
 
     #[test]

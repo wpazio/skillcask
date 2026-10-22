@@ -128,6 +128,12 @@ impl Lock {
 }
 
 pub fn parse(text: &str) -> Result<Lock> {
+    if text.lines().any(|l| ["<<<<<<<", "=======", ">>>>>>>"].iter().any(|m| l.starts_with(m))) {
+        return Err(bad("unresolved merge conflict").hint(format!(
+            "resolve {} first, keep either side of {FILE} (e.g. git checkout --theirs {FILE}), then run skillcask install; it locks what that side lacks",
+            crate::manifest::FILE
+        )));
+    }
     let doc: DocumentMut = text.parse().map_err(bad)?;
     match doc.get("version").and_then(Item::as_integer) {
         Some(1 | 2) => {}
@@ -300,6 +306,17 @@ mod tests {
             let e = parse(&text.replace("\"acme/x\" = \"^1.0\"", bad)).unwrap_err();
             assert!(e.msg.contains("invalid requires in a/b"), "{bad}: {}", e.msg);
         }
+    }
+
+    #[test]
+    fn merge_conflict_markers_fail_with_a_hint() {
+        let ok = sample();
+        let at = ok.find("\n[[package]]").unwrap();
+        let text = format!("{}\n<<<<<<< HEAD\n{}=======\n>>>>>>> other\n", &ok[..at], &ok[at..]);
+        let e = parse(&text).unwrap_err();
+        assert!(e.msg.contains("merge conflict") && e.code == MANIFEST, "{}", e.msg);
+        assert!(e.hint.unwrap().contains("skillcask install"));
+        assert!(parse(&ok.replace("version = 1\n", "version = 1 # <<<<<<< only at line start\n")).is_ok());
     }
 
     fn sample() -> String {
