@@ -53,8 +53,12 @@ import SkillcaskDomain
     public private(set) var presentation: Presentation = .loading
     /// The selected row's id (`SkillEntry.ID`); bound to the list's selection.
     public var selection: SkillEntry.ID?
-    /// The active filter chip.
-    public var filter: Filter = .all
+    /// The active filter chip; a filter the scope does not offer (`Filter.available(in:)`) is All.
+    public var filter: Filter {
+        get { selectedFilter }
+        set { selectedFilter = newValue.resolved(in: scope) }
+    }
+    private var selectedFilter: Filter = .all
     /// The list's sort menu; the state order is the default (S2 note).
     public var sort: SkillcaskDomain.SortOrder = .state
     /// The search field's text.

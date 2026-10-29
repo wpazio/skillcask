@@ -18,19 +18,25 @@ public struct FilterChip: View {
     public let isActive: Bool
     /// The glyph before the title; nil draws none (the list's filter chips).
     public let symbol: String?
+    /// The space either side of the label: the board's 12 pt (`Spacing.m`), 10 pt in the list's chip bar.
+    public let horizontalPadding: CGFloat
     public let action: () -> Void
 
     public init(
         _ title: String, symbol: String? = nil, count: Int? = nil, countSeverity: Severity = .neutral,
-        isActive: Bool, action: @escaping () -> Void
+        isActive: Bool, horizontalPadding: CGFloat = Spacing.m, action: @escaping () -> Void
     ) {
         self.title = title
         self.symbol = symbol
         self.count = count
         self.countSeverity = countSeverity
         self.isActive = isActive
+        self.horizontalPadding = horizontalPadding
         self.action = action
     }
+
+    /// The width a shown count badge adds to a chip: the one-digit small badge and the gap before it.
+    nonisolated public static let badgeReserve: CGFloat = Size.badgeSmall + Spacing.xs
 
     /// The badge text of a count: `nil` for no count or zero, otherwise the number in the user's locale.
     nonisolated public static func countText(_ count: Int?) -> String? {
@@ -52,7 +58,7 @@ public struct FilterChip: View {
                 }
             }
         }
-        .buttonStyle(ChipButtonStyle(isActive: isActive))
+        .buttonStyle(ChipButtonStyle(isActive: isActive, horizontalPadding: horizontalPadding))
         .accessibilityAddTraits(isActive ? .isSelected : [])
     }
 }
@@ -60,13 +66,14 @@ public struct FilterChip: View {
 /// The chip's drawing: capsule, hairline when idle, `accentSoft` when active; the label dims while pressed.
 private struct ChipButtonStyle: ButtonStyle {
     let isActive: Bool
+    let horizontalPadding: CGFloat
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(Font.Token.calloutMedium)
             .foregroundStyle(isActive ? Color.accent : Color.textSecondary)
             .lineLimit(1)
-            .padding(.horizontal, Spacing.m)
+            .padding(.horizontal, horizontalPadding)
             .frame(height: Size.chip)
             .background(isActive ? Color.accentSoft : Color.clear, in: Capsule())
             .overlay {

@@ -124,7 +124,7 @@ public struct SkillcaskCommands: Commands {
             if let store {
                 @Bindable var store = store
                 Picker(ShellCopy.viewMenu, selection: $store.filter) {
-                    ForEach(Filter.allCases, id: \.self) { filter in
+                    ForEach(Filter.available(in: store.scope), id: \.self) { filter in
                         Text(FilterCopy.title(filter)).tag(filter)
                     }
                 }

@@ -2,10 +2,10 @@ import SkillcaskDomain
 import SwiftUI
 
 /// The Add Skill header's source filter: "All" with the total, then one `FilterChip` per `SearchStore.sourceChips`
-/// with its glyph and count, single-select on `sourceFilter`, scrolling sideways as `FilterChipBar` does. A source
-/// with no results is dimmed and disabled unless it is the active one, so the filter can always be cleared; clicking
-/// the active chip goes back to All. Unlike the Skills list, which dims for offline and keeps its chips selectable,
-/// a dimmed chip here would only show an empty list. A repository the policy blocks follows the chips as a plain,
+/// with its glyph and count, single-select on `sourceFilter`, scrolling sideways (the Skills list's `FilterChipBar`
+/// wraps instead). A source with no results is dimmed and disabled unless it is the active one, so the filter can
+/// always be cleared; clicking the active chip goes back to All. Unlike the Skills list, which dims for offline and
+/// keeps its chips selectable, a dimmed chip here would only show an empty list. A repository the policy blocks follows the chips as a plain,
 /// non-interactive pill: its results count only in All.
 struct SourceFilterBar: View {
     let search: SearchStore

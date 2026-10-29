@@ -1,3 +1,5 @@
+import SkillcaskCore
+
 /// The filter chips above the list (brief IA). `apply` also takes the search field's text.
 public enum Filter: String, CaseIterable, Hashable, Sendable {
     case all
@@ -5,6 +7,19 @@ public enum Filter: String, CaseIterable, Hashable, Sendable {
     case updates
     case notManaged
     case projectSkills
+
+    /// The filters a scope offers, in chip order: "Not managed" only in the global scope (D38), "Project skills"
+    /// only in a project. The list's chips and the View menu both show this list.
+    public static func available(in scope: Scope) -> [Filter] {
+        scope.isPersonal
+            ? [.all, .needsAttention, .updates, .notManaged] : [.all, .needsAttention, .updates, .projectSkills]
+    }
+
+    /// This filter where `scope` offers it, else All: a filter set for another scope never leaves an empty list
+    /// behind a chip that is not drawn.
+    public func resolved(in scope: Scope) -> Filter {
+        Self.available(in: scope).contains(self) ? self : .all
+    }
 
     public func matches(_ entry: SkillEntry) -> Bool {
         switch self {

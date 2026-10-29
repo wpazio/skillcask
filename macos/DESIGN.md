@@ -151,6 +151,14 @@ them by number; the numbers have gaps.
   CLI's hint. Exit 4 (integrity) has its own variant and is never retried automatically.
 - Activity (⌥⌘L) is a drawer in the list column with one row per run this session: title, command,
   exit word, duration and the full transcript. It opens by itself only from a failure's Details.
+- The Skills list's filter chips (S2) show the scope's four filters (`Filter.available(in:)`): All,
+  Needs attention, Updates, then Not managed in My Skills (D38) or Project skills in a project; the
+  View menu lists the same four, and a filter the scope lacks falls back to All. Chips draw short
+  titles (All, Attention, Updates, Unmanaged, Project) at 10 pt padding, the full title as tooltip
+  and accessibility label. They wrap and never scroll or hide: line breaks count every Attention
+  and Updates chip as if it showed its badge, so below 10 the lines change only with the column's width
+  (one line at 360 pt, two at the 300 pt minimum). Add Skill's source bar is unchanged for now: it
+  still scrolls sideways at 12 pt padding.
 - Add Skill's source filter is client-side over one `search` document: All, then one chip per
   allowed repository, skills.sh when searched and any other source the results name, each with its
   count. Single select; clicking the active chip goes back to All. The filter persists across

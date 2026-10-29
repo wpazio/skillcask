@@ -21,6 +21,23 @@ import Testing
         #expect(Set(Filter.allCases.map(FilterCopy.title)).count == Filter.allCases.count)
     }
 
+    /// The list's chips carry short titles; the full title stays everywhere else (View menu, Overview, empty
+    /// states) and is the chip's tooltip and accessibility label.
+    @Test func listChipsUseShortTitles() {
+        let expected: [Filter: String] = [
+            .all: "All",
+            .needsAttention: "Attention",
+            .updates: "Updates",
+            .notManaged: "Unmanaged",
+            .projectSkills: "Project",
+        ]
+        for filter in Filter.allCases {
+            #expect(FilterCopy.chipTitle(filter) == expected[filter])
+        }
+        #expect(Set(Filter.allCases.map(FilterCopy.chipTitle)).count == Filter.allCases.count)
+        #expect(FilterCopy.barLabel == "Filter")
+    }
+
     @Test func badgeTextHidesNilAndZero() {
         #expect(FilterChip.countText(nil) == nil)
         #expect(FilterChip.countText(0) == nil)

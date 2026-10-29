@@ -75,7 +75,9 @@ struct SkillListView: View {
                 searchField
                 sortMenu
             }
-            FilterChipBar(counts: state.chipCounts, dimmed: state.dimmedFilters, selection: $store.filter)
+            FilterChipBar(
+                filters: Filter.available(in: store.scope), counts: state.chipCounts, dimmed: state.dimmedFilters,
+                selection: $store.filter)
             if let skills = AdoptPlan.headerBatch(
                 filter: store.filter, entries: store.snapshot?.entries ?? [], scope: store.scope)
             {

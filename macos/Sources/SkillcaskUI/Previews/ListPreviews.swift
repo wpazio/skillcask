@@ -6,9 +6,11 @@ extension PreviewRegistry {
     /// The skills column at its board width over the fixture boot, one entry per S2/S11 state: List-States
     /// (empty after Set Up, filtered no matches, stale while refreshing, offline), the Components board's hover
     /// row (review-pr), Running (a Sync in the header with the success toast; the sign-in failure banner), and
-    /// the Main board's selected pdf row in white on the accent.
+    /// the Main board's selected pdf row in white on the accent; `minimumWidth` is the column at its 300 pt minimum,
+    /// where the filter chips wrap to a second line.
     static let list: [Entry] = ListSample.Variant.allCases.map { variant in
-        Entry(id: "P3-2", state: variant.rawValue, size: CGSize(width: Size.listWidth, height: 800)) {
+        let width = variant == .minimumWidth ? Size.listMinWidth : Size.listWidth
+        return Entry(id: "P3-2", state: variant.rawValue, size: CGSize(width: width, height: 800)) {
             AnyView(ListSample(variant))
         }
     }
@@ -17,7 +19,7 @@ extension PreviewRegistry {
 /// The list column over a fresh fixture boot, so light and dark never share a store.
 private struct ListSample: View {
     enum Variant: String, CaseIterable {
-        case empty, noMatches, refreshing, offline, hover, running, failure, selected
+        case empty, noMatches, refreshing, offline, hover, running, failure, selected, minimumWidth
     }
 
     @State private var stores: Boot.Stores
@@ -44,7 +46,7 @@ private struct ListSample: View {
             store.preload(snapshot: DesignFixtures.api, selection: "jira-communication", isRefreshing: true)
         case .offline:
             store.preload(snapshot: DesignFixtures.apiOffline, presentation: .offline)
-        case .hover, .selected:
+        case .hover, .selected, .minimumWidth:
             break
         case .running:
             runner.preloadRunning(title: ActionCopy.syncing, in: Boot.apiScope)
